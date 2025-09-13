@@ -1,0 +1,38 @@
+services:
+  # --- REDIS ---
+  redis:
+    image: redis:7.2.3-alpine
+    container_name: biamino-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- БЭКЕНД ---
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: biamino-feedback-bot
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - SPREADSHEET_ID=${SPREADSHEET_ID}
+      - SERVICE_ACCOUNT_FILE=${SERVICE_ACCOUNT_FILE}
+      - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
+
+volumes:
+  redis_data:
