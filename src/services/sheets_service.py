@@ -117,7 +117,7 @@ class GoogleSheetsService:
                     cols="5"
                 )
                 # Add headers with exact column names
-                employee_sheet.update('A1:E1', [["Дата", "Задачи", "Фидбек по задачам (оценка их)", "Сложности по задачам(вопросы)", "Отчет за день"]])
+                employee_sheet.update('A1:E1', [["Дата", "Задачи", "Фидбек по задачам", "Сложности по задачам", "Отчет за день"]])
             
             # Check if report for today already exists
             records = employee_sheet.get_all_records()
@@ -147,8 +147,8 @@ class GoogleSheetsService:
         """Check if employee has submitted report for the date.
         
         Checks that all required columns are filled:
-        - 'Фидбек по задачам (оценка их)'
-        - 'Сложности по задачам(вопросы)'
+        - 'Фидбек по задачам'
+        - 'Сложности по задачам'
         - 'Отчет за день'
         """
         if date is None:
