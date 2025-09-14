@@ -161,15 +161,15 @@ class GoogleSheetsService:
             for record in records:
                 if record.get("Дата") == date:
                     # Check all required columns are filled
-                    feedback = record.get("Фидбек по задачам (оценка их)", "").strip()
-                    difficulties = record.get("Сложности по задачам(вопросы)", "").strip()
+                    feedback = record.get("Фидбек по задачам", "").strip()
+                    difficulties = record.get("Сложности по задачам", "").strip()
                     daily_report = record.get("Отчет за день", "").strip()
                     
                     # Return True only if ALL columns are filled
                     if feedback and difficulties and daily_report:
                         return True
                     else:
-                        logger.debug(f"Employee {employee_id} has incomplete report for {date}: "
+                        logger.info(f"Employee {employee_id} has incomplete report for {date}: "
                                    f"feedback={bool(feedback)}, difficulties={bool(difficulties)}, "
                                    f"daily_report={bool(daily_report)}")
                         return False

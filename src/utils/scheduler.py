@@ -4,6 +4,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot
+from aiogram.fsm.storage.base import StorageKey
 from loguru import logger
 import pytz
 
@@ -17,6 +18,29 @@ class BotScheduler:
         self.bot = bot
         self.sheets_service = sheets_service
         self.scheduler = AsyncIOScheduler(timezone=pytz.timezone('Europe/Moscow'))
+        
+    async def is_user_authorized(self, telegram_id: int) -> bool:
+        """Check if user is authorized by checking FSM state."""
+        try:
+            storage = self.bot.session.middleware.storage
+            storage_key = StorageKey(
+                bot_id=self.bot.id,
+                chat_id=telegram_id,
+                user_id=telegram_id
+            )
+            
+            # Get FSM data from storage
+            data = await storage.get_data(key=storage_key)
+            
+            # Check if user has authenticated flag
+            is_authenticated = data.get('authenticated', False)
+            logger.debug(f"User {telegram_id} authorization status: {is_authenticated}")
+            
+            return is_authenticated
+            
+        except Exception as e:
+            logger.error(f"Error checking authorization for user {telegram_id}: {e}")
+            return False
         
     async def start(self):
         """Start the scheduler."""
@@ -51,35 +75,48 @@ class BotScheduler:
             employees = await self.sheets_service.get_all_employees()
             
             triggered_count = 0
+            skipped_count = 0
             
             for employee in employees:
                 employee_id = employee.get("ID", "")
-                telegram_id = employee.get("TelegramID")  # Updated to match your column name
+                telegram_ids_str = employee.get("TelegramID", "")
                 
-                if not employee_id or not telegram_id:
+                if not employee_id or not telegram_ids_str:
                     continue
                     
                 # Check if report already submitted
                 has_report = await self.sheets_service.check_report_submitted(employee_id, today)
                 
                 if not has_report:
-                    try:
-                        report_text = (
-                            "Пришло время для отчета! 📝\n\n"
-                            "Используйте команду /report для заполнения."
-                        )
+                    # Parse multiple Telegram IDs separated by commas
+                    telegram_ids = [tid.strip() for tid in str(telegram_ids_str).split(',') if tid.strip()]
+                    
+                    for telegram_id in telegram_ids:
+                        try:
+                            # Check if user is authorized
+                            is_authorized = await self.is_user_authorized(int(telegram_id))
+                            
+                            if not is_authorized:
+                                skipped_count += 1
+                                logger.warning(f"Skipping report trigger for unauthorized user {employee_id} (TG: {telegram_id})")
+                                continue
+                            
+                            report_text = (
+                                "Пришло время для отчета! 📝\n\n"
+                                "Используйте команду /report для заполнения."
+                            )
+                            
+                            await self.bot.send_message(int(telegram_id), report_text)
+                            triggered_count += 1
+                            logger.info(f"Triggered report collection for {employee_id} (TG: {telegram_id})")
+                            
+                            # Small delay to avoid hitting rate limits
+                            await asyncio.sleep(0.5)
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to trigger report collection for {employee_id} (TG: {telegram_id}): {e}")
                         
-                        await self.bot.send_message(int(telegram_id), report_text)
-                        triggered_count += 1
-                        logger.info(f"Triggered report collection for {employee_id}")
-                        
-                        # Small delay to avoid hitting rate limits
-                        await asyncio.sleep(0.5)
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to trigger report collection for {employee_id}: {e}")
-                        
-            logger.info(f"Report collection triggered for {triggered_count} employees")
+            logger.info(f"Report collection triggered for {triggered_count} authorized employees, skipped {skipped_count} unauthorized")
             
         except Exception as e:
             logger.error(f"Error in trigger_report_collection: {e}")
