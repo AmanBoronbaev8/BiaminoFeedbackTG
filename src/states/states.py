@@ -1,11 +1,5 @@
-"""FSM states for report collection and authentication flows."""
+"""FSM states for report collection flows."""
 from aiogram.fsm.state import State, StatesGroup
-
-
-class AuthStates(StatesGroup):
-    """States for employee authentication."""
-    waiting_for_name = State()
-    waiting_for_password = State()
 
 
 class ReportStates(StatesGroup):

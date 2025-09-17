@@ -11,6 +11,12 @@ from loguru import logger
 from ..config_data import Config
 from ..services import GoogleSheetsService
 from ..states import AdminStates
+from ..utils import (
+    parse_telegram_ids,
+    is_admin,
+    broadcast_to_employees,
+    send_tasks_to_employees
+)
 
 
 admin_router = Router()
@@ -19,28 +25,9 @@ admin_router = Router()
 EMPLOYEES_PER_PAGE = 5
 
 
-def is_admin(user_id: int, config: Config) -> bool:
-    """Check if user is admin."""
-    tg_bot = config.get_tg_bot()
-    return user_id in tg_bot.admin_ids
-
-
 async def get_employees_with_tasks(sheets_service: GoogleSheetsService, date: str) -> List[Dict]:
-    """Get employees who have tasks for the specified date."""
-    employees = await sheets_service.get_all_employees()
-    employees_with_tasks = []
-    
-    for employee in employees:
-        employee_id = employee.get("ID", "")
-        if not employee_id:
-            continue
-            
-        tasks = await sheets_service.get_employee_tasks(employee_id, date)
-        if tasks and tasks.strip():
-            employee['tasks'] = tasks
-            employees_with_tasks.append(employee)
-            
-    return employees_with_tasks
+    """Get employees who have tasks for the specified date using batch operations."""
+    return await sheets_service.get_employees_with_tasks_batch(date)
 
 
 def create_employee_selection_keyboard(employees: List[Dict], page: int = 0, selected: List[str] = None) -> InlineKeyboardMarkup:
@@ -285,33 +272,14 @@ async def send_tasks_to_selected(callback: CallbackQuery, state: FSMContext, she
             await callback.answer("Не выбран ни один сотрудник!", show_alert=True)
             return
             
-        sent_count = 0
-        failed_count = 0
+        # Filter selected employees
+        selected_employee_data = [
+            emp for emp in employees_with_tasks 
+            if emp.get("ID") in selected_employees
+        ]
         
-        # Create a lookup dict for faster access
-        employees_dict = {emp.get("ID", ""): emp for emp in employees_with_tasks}
-        
-        for employee_id in selected_employees:
-            employee = employees_dict.get(employee_id)
-            if not employee:
-                continue
-                
-            telegram_id = employee.get("TelegramID")
-            tasks = employee.get("tasks", "")
-            
-            if telegram_id and tasks:
-                try:
-                    name = f"{employee.get('Фамилия', '')} {employee.get('Имя', '')}".strip()
-                    task_text = f"📋 Привет, {name}!\n\nУ вас новые задачи на сегодня:\n\n{tasks}"
-                    await bot.send_message(int(telegram_id), task_text)
-                    sent_count += 1
-                    logger.info(f"Sent tasks to {employee_id}")
-                except Exception as e:
-                    failed_count += 1
-                    logger.error(f"Failed to send tasks to {employee_id}: {e}")
-            else:
-                failed_count += 1
-                logger.warning(f"Employee {employee_id} missing telegram_id or tasks")
+        # Use standardized task sending utility
+        sent_count, failed_count = await send_tasks_to_employees(bot, selected_employee_data)
                 
         result_text = (
             f"📤 <b>Отправка задач завершена!</b>\n\n"
@@ -349,30 +317,14 @@ async def admin_remind_pending(callback: CallbackQuery, sheets_service: GoogleSh
     """Remind employees who haven't submitted reports."""
     try:
         today = datetime.now().strftime("%d.%m.%Y")
-        employees_without_reports = await sheets_service.get_employees_without_reports(today)
-        employees = await sheets_service.get_all_employees()
+        _, employees_with_telegram = await sheets_service.get_employees_without_reports_batch(today)
         
-        sent_count = 0
+        reminder_text = (
+            "Кажется, вы забыли заполнить отчет за сегодня. "
+            "Пожалуйста, не забудьте это сделать! ⏰"
+        )
         
-        for employee in employees:
-            employee_id = employee.get("ID", "")
-            telegram_ids_str = employee.get("TelegramID", "")
-            
-            if employee_id in employees_without_reports and telegram_ids_str:
-                # Parse multiple Telegram IDs separated by commas
-                telegram_ids = [tid.strip() for tid in str(telegram_ids_str).split(',') if tid.strip()]
-                
-                for telegram_id in telegram_ids:
-                    try:
-                        reminder_text = (
-                            "Кажется, вы забыли заполнить отчет за сегодня. "
-                            "Пожалуйста, не забудьте это сделать! ⏰"
-                        )
-                        await bot.send_message(int(telegram_id), reminder_text)
-                        sent_count += 1
-                        logger.info(f"Sent reminder to {employee_id} (TG: {telegram_id})")
-                    except Exception as e:
-                        logger.error(f"Failed to send reminder to {employee_id} (TG: {telegram_id}): {e}")
+        sent_count, failed_count = await broadcast_to_employees(bot, employees_with_telegram, reminder_text)
                     
         await callback.message.edit_text(
             f"Напоминания отправлены {sent_count} сотрудникам, которые не сдали отчет.",
@@ -393,22 +345,13 @@ async def admin_remind_pending(callback: CallbackQuery, sheets_service: GoogleSh
 async def admin_remind_all(callback: CallbackQuery, sheets_service: GoogleSheetsService, bot: Bot):
     """Remind all employees about reports."""
     try:
-        employees = await sheets_service.get_all_employees()
-        sent_count = 0
+        employees = await sheets_service.get_all_employees_cached()
         
-        for employee in employees:
-            telegram_id = employee.get("TelegramID")  # Updated to match your column name
-            
-            if telegram_id:
-                try:
-                    reminder_text = (
-                        "Коллеги, просьба срочно заполнить отчет и фидбек за сегодня! 📝"
-                    )
-                    await bot.send_message(int(telegram_id), reminder_text)
-                    sent_count += 1
-                    logger.info(f"Sent reminder to {employee.get('ID', '')}")
-                except Exception as e:
-                    logger.error(f"Failed to send reminder to {employee.get('ID', '')}: {e}")
+        reminder_text = (
+            "Коллеги, просьба срочно заполнить отчет и фидбек за сегодня! 📝"
+        )
+        
+        sent_count, failed_count = await broadcast_to_employees(bot, employees, reminder_text)
                     
         await callback.message.edit_text(
             f"Напоминания отправлены всем {sent_count} сотрудникам.",
@@ -430,28 +373,9 @@ async def admin_send_all_tasks(callback: CallbackQuery, sheets_service: GoogleSh
     """Send all tasks to all employees who have them."""
     try:
         today = datetime.now().strftime("%d.%m.%Y")
-        employees = await sheets_service.get_all_employees()
+        employees_with_tasks = await sheets_service.get_employees_with_tasks_batch(today)
         
-        sent_count = 0
-        
-        for employee in employees:
-            employee_id = employee.get("ID", "")
-            telegram_id = employee.get("TelegramID")  # Updated to match your column name
-            
-            if not employee_id or not telegram_id:
-                logger.debug(f"Skipping employee {employee_id}: missing telegram_id={telegram_id}")
-                continue
-                
-            tasks = await sheets_service.get_employee_tasks(employee_id, today)
-            
-            if tasks and tasks.strip():
-                try:
-                    task_text = f"📋 Ваши задачи на сегодня:\n\n{tasks}"
-                    await bot.send_message(int(telegram_id), task_text)
-                    sent_count += 1
-                    logger.info(f"Sent all tasks to {employee_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send all tasks to {employee_id}: {e}")
+        sent_count, failed_count = await send_tasks_to_employees(bot, employees_with_tasks)
                     
         await callback.message.edit_text(
             f"Все задачи повторно отправлены {sent_count} сотрудникам.",
@@ -480,69 +404,62 @@ async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
 
 
 @admin_router.message(AdminStates.waiting_for_broadcast_message)
-async def process_broadcast_message(message: Message, state: FSMContext, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
-    """Process and send broadcast message."""
+async def process_broadcast_message(
+    message: Message, 
+    state: FSMContext, 
+    sheets_service: GoogleSheetsService, 
+    bot: Bot, 
+    config: Config
+):
+    """Process and send broadcast message (universal)."""
     if not is_admin(message.from_user.id, config):
         return
-        
+
     try:
-        employees = await sheets_service.get_all_employees()
+        employees = await sheets_service.get_all_employees_cached()
         logger.info(f"Found {len(employees)} employees for broadcast")
-        sent_count = 0
-        failed_count = 0
-        
+
+        sent_count, failed_count = 0, 0
+
         for employee in employees:
-            telegram_id = employee.get("TelegramID")  # Updated to match your column name
+            telegram_ids = parse_telegram_ids(employee.get("TelegramID"))
             employee_id = employee.get("ID", "Unknown")
-            
-            logger.debug(f"Processing employee {employee_id} with telegram_id: {telegram_id}")
-            
-            if telegram_id:
+
+            if not telegram_ids:
+                failed_count += 1
+                continue
+
+            employee_success = False
+            for telegram_id in telegram_ids:
                 try:
-                    # Copy the message to each user
-                    if message.text:
-                        await bot.send_message(int(telegram_id), message.text)
-                    elif message.photo:
-                        await bot.send_photo(
-                            int(telegram_id), 
-                            message.photo[-1].file_id,
-                            caption=message.caption
-                        )
-                    elif message.video:
-                        await bot.send_video(
-                            int(telegram_id), 
-                            message.video.file_id,
-                            caption=message.caption
-                        )
-                    elif message.document:
-                        await bot.send_document(
-                            int(telegram_id), 
-                            message.document.file_id,
-                            caption=message.caption
-                        )
-                    # Add more media types as needed
-                    
-                    sent_count += 1
-                    logger.info(f"Sent broadcast to {employee.get('ID', '')}")
-                    
+                    # Универсальная пересылка любого сообщения
+                    await bot.copy_message(
+                        chat_id=telegram_id,
+                        from_chat_id=message.chat.id,
+                        message_id=message.message_id
+                    )
+                    employee_success = True
+                    break
                 except Exception as e:
-                    failed_count += 1
-                    logger.error(f"Failed to send broadcast to {employee.get('ID', '')}: {e}")
+                    logger.error(f"Failed to send message to {employee_id} (TG: {telegram_id}): {e}")
+
+            if employee_success:
+                sent_count += 1
             else:
-                logger.debug(f"Skipping employee {employee_id}: no telegram_id")
-                    
+                failed_count += 1
+
         result_text = (
-            f"Рассылка завершена!\n"
-            f"✅ Отправлено: {sent_count}\n"
-            f"❌ Не удалось отправить: {failed_count}"
+            f"📢 Рассылка завершена!\n\n"
+            f"✅ Успешно: {sent_count}\n"
+            f"❌ Ошибок: {failed_count}"
         )
-        
         await message.answer(result_text)
-        await state.clear()
-        
+
     except Exception as e:
         logger.error(f"Error processing broadcast: {e}")
-        await message.answer("Произошла ошибка при рассылке.")
+        await message.answer("❌ Произошла ошибка при рассылке.")
+
+    finally:
         await state.clear()
 
 
@@ -554,22 +471,22 @@ async def cmd_stats(message: Message, config: Config, sheets_service: GoogleShee
         
     try:
         today = datetime.now().strftime("%d.%m.%Y")
-        employees = await sheets_service.get_all_employees()
-        employees_without_reports = await sheets_service.get_employees_without_reports(today)
+        employees = await sheets_service.get_all_employees_cached()
+        employees_without_reports_ids, _ = await sheets_service.get_employees_without_reports_batch(today)
         
         total_employees = len(employees)
-        reports_submitted = total_employees - len(employees_without_reports)
+        reports_submitted = total_employees - len(employees_without_reports_ids)
         
         stats_text = (
             f"📊 <b>Статистика на {today}</b>\n\n"
             f"👥 Всего сотрудников: {total_employees}\n"
             f"✅ Сдали отчет: {reports_submitted}\n"
-            f"⏳ Не сдали отчет: {len(employees_without_reports)}\n\n"
+            f"⏳ Не сдали отчет: {len(employees_without_reports_ids)}\n\n"
         )
         
-        if employees_without_reports:
+        if employees_without_reports_ids:
             stats_text += "<b>Не сдали отчет:</b>\n"
-            for emp_id in employees_without_reports:
+            for emp_id in employees_without_reports_ids:
                 stats_text += f"• {emp_id}\n"
                 
         await message.answer(stats_text, parse_mode="HTML")

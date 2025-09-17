@@ -25,22 +25,17 @@ async def main():
         config = load_config()
         logger.info("Configuration loaded successfully")
         
-        # Get configuration objects
-        tg_bot = config.get_tg_bot()
-        google_sheets = config.get_google_sheets()
-        redis_config = config.get_redis()
-        
         # Initialize bot with default properties
         bot = Bot(
-            token=tg_bot.token.get_secret_value(),
+            token=config.bot_token.get_secret_value(),
             default=DefaultBotProperties(parse_mode=ParseMode.HTML)
         )
         
         # Initialize dispatcher with Redis storage
         try:
-            storage = RedisStorage.from_url(redis_config.url)
+            storage = RedisStorage.from_url(config.redis_url)
             dp = Dispatcher(storage=storage)
-            logger.info(f"Redis storage initialized: {redis_config.url}")
+            logger.info(f"Redis storage initialized: {config.redis_url}")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             logger.warning("Falling back to memory storage")
@@ -49,8 +44,8 @@ async def main():
         
         # Initialize Google Sheets service
         sheets_service = GoogleSheetsService(
-            service_account_file=google_sheets.service_account_file,
-            spreadsheet_id=google_sheets.spreadsheet_id
+            service_account_file=config.service_account_file,
+            spreadsheet_id=config.spreadsheet_id
         )
         await sheets_service.initialize()
         logger.info("Google Sheets service initialized")
@@ -63,9 +58,9 @@ async def main():
         dp.message.middleware(middleware)
         dp.callback_query.middleware(middleware)
         
-        # Include routers
-        dp.include_router(user_router)
+        # Include routers - admin router first to handle admin commands
         dp.include_router(admin_router)
+        dp.include_router(user_router)
         
         logger.info("Routers registered successfully")
         

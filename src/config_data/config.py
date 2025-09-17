@@ -1,29 +1,12 @@
 """Configuration module for the bot."""
 import os
 from typing import List
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class TgBot(BaseModel):
-    """Telegram bot configuration."""
-    token: SecretStr
-    admin_ids: List[int]
-
-
-class GoogleSheets(BaseModel):
-    """Google Sheets configuration."""
-    spreadsheet_id: str
-    service_account_file: str = "service_account.json"
-
-
-class Redis(BaseModel):
-    """Redis configuration."""
-    url: str
-
-
 class Config(BaseSettings):
-    """Main configuration class."""
+    """Main configuration class with direct field access."""
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -31,31 +14,23 @@ class Config(BaseSettings):
         extra="forbid"
     )
     
-    # Use proper field names that match environment variables
     bot_token: SecretStr
     admin_ids: str
     spreadsheet_id: str
     service_account_file: str = "service_account.json"
     redis_url: str = "redis://localhost:6379/0"
 
-    def get_tg_bot(self) -> TgBot:
-        """Get TgBot configuration."""
-        admin_ids_list = [int(id_.strip()) for id_ in self.admin_ids.split(",") if id_.strip()]
-        return TgBot(
-            token=self.bot_token,
-            admin_ids=admin_ids_list
-        )
+    @field_validator('admin_ids')
+    @classmethod
+    def validate_admin_ids(cls, v):
+        if not v or not v.strip():
+            raise ValueError("admin_ids cannot be empty")
+        return v
 
-    def get_google_sheets(self) -> GoogleSheets:
-        """Get GoogleSheets configuration."""
-        return GoogleSheets(
-            spreadsheet_id=self.spreadsheet_id,
-            service_account_file=self.service_account_file
-        )
-
-    def get_redis(self) -> Redis:
-        """Get Redis configuration."""
-        return Redis(url=self.redis_url)
+    @property
+    def admin_ids_list(self) -> List[int]:
+        """Get admin IDs as list of integers."""
+        return [int(id_.strip()) for id_ in self.admin_ids.split(",") if id_.strip()]
 
 
 def load_config() -> Config:

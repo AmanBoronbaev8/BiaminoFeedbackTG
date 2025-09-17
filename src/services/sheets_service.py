@@ -1,10 +1,12 @@
 """Google Sheets service module."""
 import asyncio
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Set
 from loguru import logger
 import gspread
 from google.oauth2.service_account import Credentials
+
+from ..utils.telegram_utils import parse_telegram_ids
 
 
 class GoogleSheetsService:
@@ -15,6 +17,10 @@ class GoogleSheetsService:
         self.spreadsheet_id = spreadsheet_id
         self.gc = None
         self.sh = None
+        # Cache for employee data to avoid repeated API calls
+        self._employees_cache = None
+        self._cache_timestamp = None
+        self._cache_ttl = 300  # 5 minutes cache TTL
         
     async def initialize(self) -> None:
         """Initialize Google Sheets connection."""
@@ -62,26 +68,109 @@ class GoogleSheetsService:
             logger.error(f"Error getting employee data: {e}")
             return None
             
-    async def verify_employee_password(self, last_name: str, first_name: str, password: str) -> Optional[Dict]:
-        """Verify employee credentials and return employee data."""
-        employee_data = await self.get_employee_data(last_name, first_name)
-        
-        if employee_data:
-            stored_password = employee_data.get("Пароль")
-            logger.info(f"Stored password: {stored_password} (type: {type(stored_password)})")
-            logger.info(f"Input password: {password} (type: {type(password)})")
+    async def get_employee_by_telegram_id(self, telegram_id: int) -> Optional[Dict]:
+        """Get employee data by TelegramID from 'Команда' sheet."""
+        try:
+            logger.debug(f"Getting employee data for TelegramID: {telegram_id}")
+            team_sheet = self.sh.worksheet("Команда")
+            records = team_sheet.get_all_records()
+            logger.debug(f"Found {len(records)} records in team sheet")
             
-            # Convert both to strings for comparison to handle int/str mismatch
-            if str(stored_password) == str(password):
-                logger.info("Password verification successful")
-                return employee_data
-            else:
-                logger.warning(f"Password mismatch: stored='{stored_password}', input='{password}'")
-        else:
-            logger.warning("Employee data not found for password verification")
+            for i, record in enumerate(records):
+                stored_telegram_id = record.get("TelegramID", "")
+                # Handle multiple telegram IDs separated by commas
+                if stored_telegram_id:
+                    telegram_ids = parse_telegram_ids(stored_telegram_id)
+                    if telegram_id in telegram_ids:
+                        logger.info(f"Found employee by TelegramID: {record}")
+                        return record
+            
+            logger.warning(f"Employee not found with TelegramID: {telegram_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting employee data by TelegramID: {e}")
+            return None
+            
+    def _is_cache_valid(self) -> bool:
+        """Check if employee cache is still valid."""
+        if self._employees_cache is None or self._cache_timestamp is None:
+            return False
         
-        return None
+        current_time = datetime.now().timestamp()
+        return (current_time - self._cache_timestamp) < self._cache_ttl
         
+    async def _refresh_employees_cache(self) -> List[Dict]:
+        """Refresh the employees cache with fresh data."""
+        try:
+            team_sheet = self.sh.worksheet("Команда")
+            records = team_sheet.get_all_records()
+            
+            self._employees_cache = records
+            self._cache_timestamp = datetime.now().timestamp()
+            
+            logger.info(f"Employee cache refreshed with {len(records)} records")
+            return records
+            
+        except Exception as e:
+            logger.error(f"Error refreshing employee cache: {e}")
+            return []
+            
+    async def get_all_employees_cached(self) -> List[Dict]:
+        """Get all employees with caching to reduce API calls."""
+        if self._is_cache_valid():
+            logger.debug("Using cached employee data")
+            return self._employees_cache
+            
+        logger.debug("Cache invalid, fetching fresh employee data")
+        return await self._refresh_employees_cache()
+        
+    async def get_employees_with_tasks_batch(self, date: str = None) -> List[Dict]:
+        """Get employees who have tasks for the specified date using batch operations."""
+        if date is None:
+            date = datetime.now().strftime("%d.%m.%Y")
+            
+        employees = await self.get_all_employees_cached()
+        employees_with_tasks = []
+        
+        # Batch process employees to reduce individual API calls
+        for employee in employees:
+            employee_id = employee.get("ID", "")
+            if not employee_id:
+                continue
+                
+            tasks = await self.get_employee_tasks(employee_id, date)
+            if tasks and tasks.strip():
+                employee['tasks'] = tasks
+                employees_with_tasks.append(employee)
+                
+        return employees_with_tasks
+        
+    async def get_employees_without_reports_batch(self, date: str = None) -> Tuple[List[str], List[Dict]]:
+        """Get employees without reports using cached data and batch processing."""
+        if date is None:
+            date = datetime.now().strftime("%d.%m.%Y")
+            
+        employees = await self.get_all_employees_cached()
+        employees_without_reports = []
+        employees_with_telegram = []
+        
+        for employee in employees:
+            employee_id = employee.get("ID", "")
+            if not employee_id:
+                continue
+                
+            has_report = await self.check_report_submitted(employee_id, date)
+            if not has_report:
+                employees_without_reports.append(employee_id)
+                # Only include employees with valid TelegramID for messaging
+                telegram_ids = parse_telegram_ids(employee.get("TelegramID"))
+                if telegram_ids:
+                    employees_with_telegram.append(employee)
+                    
+        return employees_without_reports, employees_with_telegram
+            
+
     async def get_employee_tasks(self, employee_id: str, date: str = None) -> Optional[str]:
         """Get tasks for employee for specific date."""
         if date is None:
@@ -89,12 +178,31 @@ class GoogleSheetsService:
             
         try:
             employee_sheet = self.sh.worksheet(employee_id)
-            records = employee_sheet.get_all_records()
             
-            # Find record for today's date
-            for record in records:
-                if record.get("Дата") == date:
-                    return record.get("Задачи", "")
+            # Get raw values to avoid duplicate header issues
+            all_values = employee_sheet.get_all_values()
+            
+            if not all_values or len(all_values) < 2:  # No data or only header
+                return ""
+                
+            # Get header row to find column indices
+            header_row = all_values[0] if all_values else []
+            
+            # Find column indices
+            date_col = None
+            tasks_col = None
+            
+            for i, header in enumerate(header_row):
+                if header == "Дата":
+                    date_col = i
+                elif header == "Задачи":
+                    tasks_col = i
+            
+            # Search for the date in data rows
+            for row in all_values[1:]:  # Skip header row
+                if len(row) > date_col and date_col is not None and row[date_col] == date:
+                    return row[tasks_col] if tasks_col is not None and len(row) > tasks_col else ""
+            
             return ""
             
         except Exception as e:
@@ -119,17 +227,35 @@ class GoogleSheetsService:
                 # Add headers with exact column names
                 employee_sheet.update('A1:E1', [["Дата", "Задачи", "Фидбек по задачам", "Сложности по задачам", "Отчет за день"]])
             
-            # Check if report for today already exists
-            records = employee_sheet.get_all_records()
-            row_to_update = None
+            # Get raw values to avoid duplicate header issues
+            all_values = employee_sheet.get_all_values()
             
-            for i, record in enumerate(records):
-                if record.get("Дата") == today:
-                    row_to_update = i + 2  # +2 because records are 0-indexed and sheet is 1-indexed + header
+            if not all_values:
+                # No data, add headers and the report
+                employee_sheet.update('A1:E1', [["Дата", "Задачи", "Фидбек по задачам", "Сложности по задачам", "Отчет за день"]])
+                new_row = [today, "", feedback, difficulties, daily_report]
+                employee_sheet.append_row(new_row)
+                logger.info(f"Saved daily report for {employee_id} on {today}")
+                return True
+                
+            # Find column indices
+            header_row = all_values[0] if all_values else []
+            date_col = None
+            
+            for i, header in enumerate(header_row):
+                if header == "Дата":
+                    date_col = i
+                    break
+            
+            # Find existing row for today
+            row_to_update = None
+            for i, row in enumerate(all_values[1:], start=2):  # Start from row 2 (1-indexed)
+                if len(row) > date_col and date_col is not None and row[date_col] == today:
+                    row_to_update = i
                     break
                     
             if row_to_update:
-                # Update existing row
+                # Update existing row (columns C, D, E for feedback, difficulties, daily_report)
                 employee_sheet.update(f'C{row_to_update}:E{row_to_update}', [[feedback, difficulties, daily_report]])
             else:
                 # Add new row
@@ -156,14 +282,44 @@ class GoogleSheetsService:
             
         try:
             employee_sheet = self.sh.worksheet(employee_id)
-            records = employee_sheet.get_all_records()
             
-            for record in records:
-                if record.get("Дата") == date:
-                    # Check all required columns are filled
-                    feedback = record.get("Фидбек по задачам", "").strip()
-                    difficulties = record.get("Сложности по задачам", "").strip()
-                    daily_report = record.get("Отчет за день", "").strip()
+            # Get raw values to avoid duplicate header issues
+            all_values = employee_sheet.get_all_values()
+            
+            if not all_values or len(all_values) < 2:  # No data or only header
+                return False
+                
+            # Get header row to find column indices
+            header_row = all_values[0] if all_values else []
+            
+            # Find column indices for required fields
+            date_col = None
+            feedback_col = None
+            difficulties_col = None
+            daily_report_col = None
+            
+            for i, header in enumerate(header_row):
+                if header == "Дата":
+                    date_col = i
+                elif header == "Фидбек по задачам":
+                    feedback_col = i
+                elif header == "Сложности по задачам":
+                    difficulties_col = i
+                elif header == "Отчет за день":
+                    daily_report_col = i
+            
+            # Check if we found all required columns
+            if None in [date_col, feedback_col, difficulties_col, daily_report_col]:
+                logger.warning(f"Missing required columns in sheet {employee_id}")
+                return False
+            
+            # Search for the date in data rows
+            for row in all_values[1:]:  # Skip header row
+                if len(row) > date_col and row[date_col] == date:
+                    # Check if all required columns are filled
+                    feedback = row[feedback_col].strip() if len(row) > feedback_col else ""
+                    difficulties = row[difficulties_col].strip() if len(row) > difficulties_col else ""
+                    daily_report = row[daily_report_col].strip() if len(row) > daily_report_col else ""
                     
                     # Return True only if ALL columns are filled
                     if feedback and difficulties and daily_report:
@@ -182,39 +338,13 @@ class GoogleSheetsService:
             return False
             
     async def get_all_employees(self) -> List[Dict]:
-        """Get all employees from 'Команда' sheet."""
-        try:
-            team_sheet = self.sh.worksheet("Команда")
-            records = team_sheet.get_all_records()
-            logger.info(f"Retrieved {len(records)} employees from Google Sheets")
-            
-            # Debug: show first employee to verify column names
-            if records:
-                logger.debug(f"First employee data: {records[0]}")
-                logger.debug(f"Available columns: {list(records[0].keys())}")
-            
-            return records
-            
-        except Exception as e:
-            logger.error(f"Error getting all employees: {e}")
-            return []
+        """Get all employees from 'Команда' sheet (backwards compatibility - uses cache)."""
+        return await self.get_all_employees_cached()
             
     async def get_employees_without_reports(self, date: str = None) -> List[str]:
-        """Get list of employee IDs who haven't submitted reports."""
-        if date is None:
-            date = datetime.now().strftime("%d.%m.%Y")
-            
-        employees = await self.get_all_employees()
-        employees_without_reports = []
-        
-        for employee in employees:
-            employee_id = employee.get("ID", "")
-            if employee_id:
-                has_report = await self.check_report_submitted(employee_id, date)
-                if not has_report:
-                    employees_without_reports.append(employee_id)
-                    
-        return employees_without_reports
+        """Get list of employee IDs who haven't submitted reports (backwards compatibility)."""
+        employee_ids, _ = await self.get_employees_without_reports_batch(date)
+        return employee_ids
         
     async def update_employee_tasks(self, employee_id: str, tasks: str, date: str = None) -> bool:
         """Update tasks for employee for specific date."""
@@ -223,17 +353,36 @@ class GoogleSheetsService:
             
         try:
             employee_sheet = self.sh.worksheet(employee_id)
-            records = employee_sheet.get_all_records()
             
-            # Find record for the date
+            # Get raw values to avoid duplicate header issues
+            all_values = employee_sheet.get_all_values()
+            
+            if not all_values:
+                # No data, add headers and the task
+                employee_sheet.update('A1:E1', [["Дата", "Задачи", "Фидбек по задачам", "Сложности по задачам", "Отчет за день"]])
+                new_row = [date, tasks, "", "", ""]
+                employee_sheet.append_row(new_row)
+                logger.info(f"Updated tasks for {employee_id} on {date}")
+                return True
+                
+            # Find column indices
+            header_row = all_values[0] if all_values else []
+            date_col = None
+            
+            for i, header in enumerate(header_row):
+                if header == "Дата":
+                    date_col = i
+                    break
+            
+            # Find existing row for the date
             row_to_update = None
-            for i, record in enumerate(records):
-                if record.get("Дата") == date:
-                    row_to_update = i + 2  # +2 because records are 0-indexed and sheet is 1-indexed + header
+            for i, row in enumerate(all_values[1:], start=2):  # Start from row 2 (1-indexed)
+                if len(row) > date_col and date_col is not None and row[date_col] == date:
+                    row_to_update = i
                     break
                     
             if row_to_update:
-                # Update existing row
+                # Update existing row (column B for tasks)
                 employee_sheet.update(f'B{row_to_update}', tasks)
             else:
                 # Add new row
