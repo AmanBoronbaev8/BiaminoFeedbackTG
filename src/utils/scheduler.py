@@ -8,7 +8,7 @@ from aiogram import Bot
 from loguru import logger
 import pytz
 
-from ..services import GoogleSheetsService
+from ..services import GoogleSheetsService, NotionService, TaskSyncService
 from .telegram_utils import broadcast_to_employees, send_tasks_to_employees, parse_telegram_ids
 
 current_timezone = pytz.timezone('Europe/Moscow')
@@ -21,6 +21,10 @@ class BotScheduler:
         self.sheets_service = sheets_service
         self.config = config
         self.scheduler = AsyncIOScheduler(timezone=current_timezone)
+        
+        # Initialize Notion services
+        self.notion_service = NotionService(config)
+        self.task_sync_service = TaskSyncService(self.notion_service, sheets_service, config)
         
     async def start(self):
         """Start the scheduler."""
@@ -43,6 +47,13 @@ class BotScheduler:
             self.send_deadline_reminders,
             CronTrigger(minute=0, timezone=current_timezone),  # Every hour
             id='deadline_reminders'
+        )
+        
+        # Schedule Notion task sync every 15 minutes
+        self.scheduler.add_job(
+            self.sync_notion_tasks,
+            CronTrigger(minute='*/15', timezone=current_timezone),  # Every 15 minutes
+            id='notion_task_sync'
         )
         
         self.scheduler.start()
@@ -193,3 +204,21 @@ class BotScheduler:
             
         except Exception as e:
             logger.error(f"Error in send_deadline_reminders: {e}", exc_info=True)
+            
+    async def sync_notion_tasks(self):
+        """Sync tasks from Notion databases to Google Sheets."""
+        logger.info("Starting Notion task synchronization")
+        
+        try:
+            stats = await self.task_sync_service.sync_tasks_from_notion()
+            
+            logger.info(
+                f"Notion sync completed - "
+                f"Tasks: {stats['total_tasks']}, "
+                f"Workers: {stats['processed_workers']}, "
+                f"Updated sheets: {stats['updated_sheets']}, "
+                f"Errors: {stats['errors']}"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in sync_notion_tasks: {e}", exc_info=True)

@@ -21,6 +21,11 @@ class Config(BaseSettings):
     service_account_file: str = "service_account.json"
     redis_url: str = "redis://localhost:6379/0"
     
+    # Notion API settings
+    notion_api_token: SecretStr
+    notion_database_id_1: str
+    notion_database_id_2: str
+    
     # Team sheet settings
     team_sheet_name: str = "Команда"
     
