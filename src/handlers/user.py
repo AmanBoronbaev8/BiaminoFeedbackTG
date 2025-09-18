@@ -45,14 +45,18 @@ async def auto_authenticate_user(message: Message, state: FSMContext, sheets_ser
             # Store employee data permanently
             await state.update_data(
                 employee_data=employee_data,
-                employee_id=employee_data.get("ID", ""),
+                employee_id=employee_data.get(config.team_id_col if config else "ID", ""),
                 authenticated=True,
                 is_admin=False
             )
             
-            # Get full name
-            first_name = employee_data.get("Имя", "")
-            last_name = employee_data.get("Фамилия", "")
+            # Get full name using config
+            if config:
+                first_name = employee_data.get(config.team_firstname_col, "")
+                last_name = employee_data.get(config.team_lastname_col, "")
+            else:
+                first_name = employee_data.get("Имя", "")
+                last_name = employee_data.get("Фамилия", "")
             full_name = f"{last_name} {first_name}".strip()
             
             # Send authentication success message
@@ -89,8 +93,13 @@ async def cmd_start(message: Message, state: FSMContext, sheets_service: GoogleS
                 "Используйте /admin для доступа к панели управления."
             )
         else:
-            first_name = employee_data.get("Имя", "")
-            last_name = employee_data.get("Фамилия", "")
+            # Use config for field names
+            if config:
+                first_name = employee_data.get(config.team_firstname_col, "")
+                last_name = employee_data.get(config.team_lastname_col, "")
+            else:
+                first_name = employee_data.get("Имя", "")
+                last_name = employee_data.get("Фамилия", "")
             full_name = f"{last_name} {first_name}".strip()
             
             await message.answer(
@@ -115,31 +124,149 @@ async def cmd_report(message: Message, state: FSMContext, sheets_service: Google
             
         employee_id = data.get("employee_id", "")
         
-        # Check if report already submitted today
-        today = datetime.now().strftime("%d.%m.%Y")
-        has_report = await sheets_service.check_report_submitted(employee_id, today)
+        # Get tasks that don't have reports for today
+        tasks_without_reports = await sheets_service.get_tasks_without_reports_today(employee_id)
         
-        if has_report:
-            await message.answer("Вы уже сдали отчет за сегодня! ✅")
+        if not tasks_without_reports:
+            await message.answer("Вы уже сдали отчеты по всем активным задачам за сегодня! ✅")
             return
             
-        await start_report_collection(message, state)
+        await start_report_collection(message, state, sheets_service)
         
     except Exception as e:
         logger.error(f"Error handling report command: {e}")
         await message.answer("Произошла ошибка. Попробуйте еще раз.")
 
 
-async def start_report_collection(message: Message, state: FSMContext):
-    """Start the report collection process."""
-    feedback_text = (
-        "Заполнение отчета! 📝\n\n"
-        "Расскажите, как вам работалось над сегодняшними задачами? "
-        "Были ли они интересными, с какими нюансами столкнулись?"
+async def start_report_collection(message: Message, state: FSMContext, sheets_service: GoogleSheetsService = None):
+    """Start the report collection process with task selection."""
+    if not sheets_service:
+        # Get sheets_service from state if not provided (for callback scenarios)
+        await message.answer("Произошла ошибка. Попробуйте команду /report еще раз.")
+        return
+        
+    data = await state.get_data()
+    employee_id = data.get("employee_id", "")
+    
+    # Get tasks that don't have reports for today
+    tasks_without_reports = await sheets_service.get_tasks_without_reports_today(employee_id)
+    
+    if not tasks_without_reports:
+        await message.answer(
+            "У вас нет задач, по которым нужно сдать отчет за сегодня.\n\n"
+            "Либо вы уже сдали отчеты по всем активным задачам, либо нет активных задач."
+        )
+        return
+        
+    # Create task selection keyboard
+    builder = InlineKeyboardBuilder()
+    
+    for task in tasks_without_reports:
+        task_id = task.get('task_id', '')
+        task_text = task.get('task', '')
+        task_preview = task_text[:30] + '...' if len(task_text) > 30 else task_text
+        
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🔸 {task_id}: {task_preview}", 
+                callback_data=f"select_task_{task_id}"
+            )
+        )
+    
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")
     )
     
-    await message.answer(feedback_text)
-    await state.set_state(ReportStates.waiting_for_feedback)
+    # Store tasks in state for later use
+    await state.update_data(available_tasks=tasks_without_reports)
+    
+    task_text = (
+        "Выберите задачу для создания отчета:\n\n"
+        "📋 <b>Задачи, по которым нужно сдать отчет:</b>\n"
+    )
+    
+    for i, task in enumerate(tasks_without_reports, 1):
+        deadline = task.get('deadline', '')
+        deadline_text = f" (до {deadline})" if deadline else ""
+        task_text += f"{i}. <b>{task.get('task_id', '')}:</b> {task.get('task', '')}{deadline_text}\n"
+    
+    await message.answer(task_text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await state.set_state(ReportStates.selecting_task)
+
+
+@user_router.callback_query(F.data.startswith("select_task_"), ReportStates.selecting_task)
+async def select_task_for_report(callback: CallbackQuery, state: FSMContext):
+    """Handle task selection for report."""
+    try:
+        task_id = callback.data.split("_", 2)[2]
+        
+        # Get task details from stored available tasks
+        data = await state.get_data()
+        available_tasks = data.get("available_tasks", [])
+        
+        selected_task = None
+        for task in available_tasks:
+            if task.get('task_id') == task_id:
+                selected_task = task
+                break
+                
+        if not selected_task:
+            await callback.answer("Задача не найдена!", show_alert=True)
+            return
+            
+        # Store selected task
+        await state.update_data(selected_task=selected_task)
+        
+        # Show task details and start feedback collection
+        task_details = (
+            f"Выбрана задача: <b>{task_id}</b>\n\n"
+            f"<b>Описание:</b> {selected_task.get('task', '')}\n"
+        )
+        
+        if selected_task.get('deadline'):
+            task_details += f"<b>Дедлайн:</b> {selected_task.get('deadline')}\n"
+            
+        task_details += (
+            "\n🔹 Расскажите, как вам работалось над этой задачей? "
+            "Была ли она интересной, с какими нюансами столкнулись?"
+        )
+        
+        await callback.message.edit_text(
+            task_details, 
+            parse_mode="HTML", 
+            reply_markup=None
+        )
+        await state.set_state(ReportStates.waiting_for_feedback)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in task selection: {e}")
+        await callback.answer("Произошла ошибка!", show_alert=True)
+
+
+@user_router.callback_query(F.data == "cancel_report", ReportStates.selecting_task)
+async def cancel_report_selection(callback: CallbackQuery, state: FSMContext):
+    """Cancel report creation."""
+    await callback.message.edit_text(
+        "Создание отчета отменено.", 
+        reply_markup=None
+    )
+    
+    # Clear only report-related data, preserve authentication
+    data = await state.get_data()
+    employee_data = data.get("employee_data")
+    employee_id = data.get("employee_id")
+    authenticated = data.get("authenticated")
+    is_admin = data.get("is_admin")
+    
+    await state.clear()
+    await state.update_data(
+        employee_data=employee_data,
+        employee_id=employee_id,
+        authenticated=authenticated,
+        is_admin=is_admin
+    )
+    await callback.answer()
 
 
 @user_router.message(ReportStates.waiting_for_feedback)
@@ -226,21 +353,33 @@ async def confirm_report(callback: CallbackQuery, state: FSMContext, sheets_serv
     try:
         data = await state.get_data()
         employee_id = data.get("employee_id", "")
+        selected_task = data.get("selected_task", {})
+        task_id = selected_task.get("task_id", "")
         feedback = data.get("feedback", "")
         difficulties = data.get("difficulties", "")
         daily_report = data.get("daily_report", "")
         
-        # Save to Google Sheets
+        if not task_id:
+            await callback.message.edit_text(
+                "Ошибка: не выбрана задача. Попробуйте заново.",
+                reply_markup=None
+            )
+            await state.clear()
+            await callback.answer()
+            return
+        
+        # Save to Google Sheets with task_id
         success = await sheets_service.save_daily_report(
-            employee_id, feedback, difficulties, daily_report
+            employee_id, task_id, feedback, difficulties, daily_report
         )
         
         if success:
             await callback.message.edit_text(
-                "Ваш отчет успешно сохранен. Спасибо! ✅",
+                f"Ваш отчет по задаче <b>{task_id}</b> успешно сохранен. Спасибо! ✅",
+                parse_mode="HTML",
                 reply_markup=None
             )
-            logger.info(f"Report saved for employee {employee_id}")
+            logger.info(f"Report saved for employee {employee_id}, task {task_id}")
         else:
             await callback.message.edit_text(
                 "Произошла ошибка при сохранении отчета. Попробуйте еще раз.",
@@ -249,14 +388,16 @@ async def confirm_report(callback: CallbackQuery, state: FSMContext, sheets_serv
             
         # Clear only report-related data, preserve authentication
         employee_data = data.get("employee_data")
-        employee_id = data.get("employee_id")
+        employee_id_stored = data.get("employee_id")
         authenticated = data.get("authenticated")
+        is_admin = data.get("is_admin")
         
         await state.clear()
         await state.update_data(
             employee_data=employee_data,
-            employee_id=employee_id,
-            authenticated=authenticated
+            employee_id=employee_id_stored,
+            authenticated=authenticated,
+            is_admin=is_admin
         )
         await callback.answer()
         
@@ -270,14 +411,14 @@ async def confirm_report(callback: CallbackQuery, state: FSMContext, sheets_serv
 
 
 @user_router.callback_query(F.data == "restart_report", ReportStates.waiting_for_confirmation)
-async def restart_report(callback: CallbackQuery, state: FSMContext):
+async def restart_report(callback: CallbackQuery, state: FSMContext, sheets_service: GoogleSheetsService):
     """Restart the report collection process."""
     await callback.message.edit_text(
         "Хорошо, давайте заполним отчет заново.",
         reply_markup=None
     )
     
-    await start_report_collection(callback.message, state)
+    await start_report_collection(callback.message, state, sheets_service)
     await callback.answer()
 
 

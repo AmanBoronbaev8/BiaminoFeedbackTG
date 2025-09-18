@@ -14,11 +14,44 @@ class Config(BaseSettings):
         extra="forbid"
     )
     
+    # Bot settings
     bot_token: SecretStr
     admin_ids: str
     spreadsheet_id: str
     service_account_file: str = "service_account.json"
     redis_url: str = "redis://localhost:6379/0"
+    
+    # Team sheet settings
+    team_sheet_name: str = "Команда"
+    
+    # Team sheet column names
+    team_id_col: str = "ID"
+    team_lastname_col: str = "Фамилия"
+    team_firstname_col: str = "Имя"
+    team_department_col: str = "Департамент"
+    team_section_col: str = "Отдел"
+    team_position_col: str = "Должность"
+    team_telegram_id_col: str = "TelegramID"
+    
+    # Tasks table column names
+    tasks_date_col: str = "Дата"
+    tasks_id_col: str = "Task ID"
+    tasks_task_col: str = "Задача"
+    tasks_deadline_col: str = "Дедлайн"
+    tasks_completed_col: str = "Выполнено"
+    
+    # Reports table column names
+    reports_date_col: str = "Date"
+    reports_task_id_col: str = "Task ID"
+    reports_feedback_col: str = "Фидбек по задачам"
+    reports_difficulties_col: str = "Сложности по задачам"
+    reports_daily_report_col: str = "Отчет за день"
+    
+    # Table positioning settings
+    tasks_table_start_row: int = 1
+    tasks_table_start_col: str = "A"
+    reports_table_start_row: int = 1
+    reports_table_start_col: str = "H"
 
     @field_validator('admin_ids')
     @classmethod

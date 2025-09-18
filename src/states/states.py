@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 class ReportStates(StatesGroup):
     """States for daily report collection."""
+    selecting_task = State()
     waiting_for_feedback = State()
     waiting_for_difficulties = State()
     waiting_for_daily_report = State()

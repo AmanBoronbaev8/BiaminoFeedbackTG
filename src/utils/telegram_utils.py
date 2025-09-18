@@ -82,7 +82,8 @@ async def broadcast_to_employees(
     employees: List[dict], 
     message: str,
     rate_limit_delay: float = 0.5,
-    parse_mode: str = None
+    parse_mode: str = None,
+    config = None
 ) -> Tuple[int, int]:
     """
     Send message to multiple employees with rate limiting and error handling.
@@ -93,6 +94,7 @@ async def broadcast_to_employees(
         message: Message to send
         rate_limit_delay: Delay between messages in seconds
         parse_mode: Parse mode for message (optional)
+        config: Config instance for field names
         
     Returns:
         Tuple of (successful_count, failed_count)
@@ -100,9 +102,17 @@ async def broadcast_to_employees(
     sent_count = 0
     failed_count = 0
     
+    # Get column names from config or use defaults
+    if config:
+        id_col = config.team_id_col
+        telegram_col = config.team_telegram_id_col
+    else:
+        id_col = "ID"
+        telegram_col = "TelegramID"
+    
     for employee in employees:
-        employee_id = employee.get("ID", "Unknown")
-        telegram_ids = parse_telegram_ids(employee.get("TelegramID"))
+        employee_id = employee.get(id_col, "Unknown")
+        telegram_ids = parse_telegram_ids(employee.get(telegram_col))
         
         if not telegram_ids:
             logger.debug(f"Skipping employee {employee_id}: no valid TelegramID")
@@ -137,15 +147,17 @@ async def broadcast_to_employees(
 async def send_tasks_to_employees(
     bot: Bot,
     employees_with_tasks: List[dict],
-    rate_limit_delay: float = 0.5
+    rate_limit_delay: float = 0.5,
+    config = None
 ) -> Tuple[int, int]:
     """
     Send tasks to employees with standardized message format.
     
     Args:
         bot: Bot instance
-        employees_with_tasks: List of employee dicts with 'tasks' field
+        employees_with_tasks: List of employee dicts with 'tasks' field (list of task dicts)
         rate_limit_delay: Delay between messages in seconds
+        config: Config instance for field names
         
     Returns:
         Tuple of (successful_count, failed_count)
@@ -153,27 +165,60 @@ async def send_tasks_to_employees(
     sent_count = 0
     failed_count = 0
     
+    # Get column names from config or use defaults
+    if config:
+        id_col = config.team_id_col
+        lastname_col = config.team_lastname_col
+        firstname_col = config.team_firstname_col
+        telegram_col = config.team_telegram_id_col
+    else:
+        id_col = "ID"
+        lastname_col = "Фамилия"
+        firstname_col = "Имя"
+        telegram_col = "TelegramID"
+    
     for employee in employees_with_tasks:
-        employee_id = employee.get("ID", "Unknown")
-        tasks = employee.get("tasks", "")
-        telegram_ids = parse_telegram_ids(employee.get("TelegramID"))
+        employee_id = employee.get(id_col, "Unknown")
+        tasks = employee.get("tasks", [])
+        telegram_ids = parse_telegram_ids(employee.get(telegram_col))
         
-        if not telegram_ids or not tasks.strip():
+        if not telegram_ids or not tasks:
             logger.debug(f"Skipping employee {employee_id}: no TelegramID or tasks")
             failed_count += 1
             continue
             
-        # Format task message
-        name = f"{employee.get('Фамилия', '')} {employee.get('Имя', '')}".strip()
-        if name.strip():
-            task_message = f"📋 Привет, {name}!\n\nУ вас новые задачи на сегодня:\n\n{tasks}"
+        # Format task message with multiple tasks
+        name = f"{employee.get(lastname_col, '')} {employee.get(firstname_col, '')}".strip()
+        
+        if isinstance(tasks, list):
+            # New format: list of task dictionaries
+            task_lines = []
+            for task in tasks:
+                task_id = task.get('task_id', '')
+                task_text = task.get('task', '')
+                deadline = task.get('deadline', '')
+                deadline_part = f" (до {deadline})" if deadline else ""
+                task_lines.append(f"• <b>{task_id}:</b> {task_text}{deadline_part}")
+            
+            if task_lines:
+                tasks_text = "\n".join(task_lines)
+            else:
+                logger.debug(f"No valid tasks for employee {employee_id}")
+                failed_count += 1
+                continue
         else:
-            task_message = f"📋 У вас новые задачи на сегодня:\n\n{tasks}"
+            # Old format: tasks as string (backwards compatibility)
+            tasks_text = str(tasks)
+            
+        if name.strip():
+            task_message = f"📋 Привет, {name}!\n\nУ вас активные задачи:\n\n{tasks_text}"
+        else:
+            task_message = f"📋 У вас активные задачи:\n\n{tasks_text}"
             
         # Send to first available telegram ID
         employee_success = False
         for telegram_id in telegram_ids:
-            success = await send_message_safe(bot, telegram_id, task_message, employee_id)
+            success = await send_message_safe(bot, telegram_id, task_message, employee_id, "HTML")
             if success:
                 employee_success = True
                 break

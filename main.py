@@ -45,13 +45,14 @@ async def main():
         # Initialize Google Sheets service
         sheets_service = GoogleSheetsService(
             service_account_file=config.service_account_file,
-            spreadsheet_id=config.spreadsheet_id
+            spreadsheet_id=config.spreadsheet_id,
+            config=config
         )
         await sheets_service.initialize()
         logger.info("Google Sheets service initialized")
         
         # Initialize scheduler
-        scheduler = BotScheduler(bot, sheets_service)
+        scheduler = BotScheduler(bot, sheets_service, config)
         
         # Register middleware to pass dependencies to handlers
         middleware = DependencyInjectionMiddleware(sheets_service, config)
