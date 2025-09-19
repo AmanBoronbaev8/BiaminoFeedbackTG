@@ -106,19 +106,33 @@ class TaskSyncService:
             logger.info(f"Created new sheet for employee: {employee_id}")
             
         # Get existing tasks to avoid duplicates
-        existing_task_names = await self._get_existing_notion_tasks(employee_id)
+        existing_tasks = await self._get_existing_notion_tasks(employee_id)
+        logger.debug(f"Found {len(existing_tasks)} existing Notion tasks for {employee_id}")
         
-        # Add new tasks from Notion
-        new_tasks_added = 0
+        # Filter tasks to avoid duplicates
+        tasks_to_add = []
         for task in tasks:
             task_name = task['task_name']
+            normalized_name = self._normalize_task_name(task_name)
             
-            # Skip if task with same name already exists (case-insensitive)
-            if task_name.lower() in existing_task_names:
+            if normalized_name in existing_tasks:
                 logger.debug(f"Task already exists, skipping: {task_name}")
                 continue
                 
-            # Create deterministic task ID based on task name and database
+            tasks_to_add.append(task)
+        
+        if not tasks_to_add:
+            logger.info(f"No new tasks to add for employee {employee_id}")
+            return
+            
+        logger.info(f"Adding {len(tasks_to_add)} new tasks for employee {employee_id}")
+        
+        # Add new tasks from Notion
+        new_tasks_added = 0
+        for task in tasks_to_add:
+            task_name = task['task_name']
+            
+            # Create unique task ID based on task name and database
             task_id = self._generate_task_id(task_name, task['database_id'])
             
             # Add task to sheet
@@ -133,12 +147,12 @@ class TaskSyncService:
                 new_tasks_added += 1
                 logger.debug(f"Added task: {task_id} - {task_name}")
             else:
-                logger.error(f"Failed to add task: {task_name}")
+                logger.error(f"Failed to add task: {task_id}")
                 
-        logger.info(f"Added {new_tasks_added} new tasks for employee {employee_id}")
+        logger.info(f"Successfully added {new_tasks_added} new tasks for employee {employee_id}")
         
     async def _get_existing_notion_tasks(self, employee_id: str) -> Set[str]:
-        """Get set of existing task names that came from Notion to avoid duplicates."""
+        """Get set of existing Notion task identifiers to avoid duplicates."""
         try:
             employee_sheet = self.sheets_service.sh.worksheet(employee_id)
             
@@ -165,8 +179,8 @@ class TaskSyncService:
             if task_id_col is None or task_name_col is None:
                 return set()
                 
-            # Extract existing task names from Notion (check both ID and name)
-            existing_task_names = set()
+            # Extract existing Notion task identifiers for deduplication
+            existing_identifiers = set()
             for row in tasks_values[1:]:
                 if (len(row) > max(task_id_col, task_name_col) and 
                     row[task_id_col].strip() and 
@@ -175,11 +189,14 @@ class TaskSyncService:
                     task_id = row[task_id_col].strip()
                     task_name = row[task_name_col].strip()
                     
-                    # Check if this is a Notion-generated task (contains 'NOTION_')
+                    # Check if this is a Notion-generated task
                     if 'NOTION_' in task_id:
-                        existing_task_names.add(task_name.lower())  # Store in lowercase for comparison
+                        # Create identifier from normalized task name for exact matching
+                        normalized_name = self._normalize_task_name(task_name)
+                        existing_identifiers.add(normalized_name)
                         
-            return existing_task_names
+            logger.debug(f"Found {len(existing_identifiers)} existing Notion tasks for {employee_id}")
+            return existing_identifiers
             
         except Exception as e:
             logger.error(f"Error getting existing tasks for {employee_id}: {e}")
@@ -225,15 +242,20 @@ class TaskSyncService:
             logger.error(f"Error adding task to sheet: {e}")
             return False
             
+    def _normalize_task_name(self, task_name: str) -> str:
+        """Normalize task name for consistent comparison."""
+        if not task_name:
+            return ""
+        
+        # Normalize: strip whitespace, convert to lowercase, remove extra spaces
+        normalized = re.sub(r'\s+', ' ', task_name.strip().lower())
+        return normalized
+        
     def _generate_task_id(self, task_name: str, database_id: str) -> str:
-        """Generate deterministic task ID for Notion tasks based on content hash."""
-        import hashlib
-        
-        # Create a deterministic hash from task name and database ID
-        content = f"{task_name.strip().lower()}_{database_id}"
-        task_hash = hashlib.md5(content.encode('utf-8')).hexdigest()[:8]
-        
-        # Use first 8 chars of database ID + hash for uniqueness
+        """Generate unique task ID for Notion tasks."""
+        # Use first 8 chars of database ID + shortened task name + random suffix
         db_prefix = database_id[:8]
+        task_prefix = re.sub(r'[^\w]', '', task_name)[:20]  # Clean and limit to 20 chars
+        random_suffix = str(uuid.uuid4())[:8]
         
-        return f"NOTION_{db_prefix}_{task_hash}".upper()
+        return f"NOTION_{db_prefix}_{task_prefix}_{random_suffix}".upper()

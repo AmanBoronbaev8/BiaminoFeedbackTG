@@ -210,15 +210,24 @@ class BotScheduler:
         logger.info("Starting Notion task synchronization")
         
         try:
+            start_time = datetime.now()
             stats = await self.task_sync_service.sync_tasks_from_notion()
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
             
             logger.info(
-                f"Notion sync completed - "
+                f"Notion sync completed in {duration:.2f}s - "
                 f"Tasks: {stats['total_tasks']}, "
                 f"Workers: {stats['processed_workers']}, "
                 f"Updated sheets: {stats['updated_sheets']}, "
                 f"Errors: {stats['errors']}"
             )
+            
+            # Add warning if many errors occurred
+            if stats['errors'] > 0:
+                error_rate = stats['errors'] / max(stats['processed_workers'], 1) * 100
+                if error_rate > 20:  # More than 20% error rate
+                    logger.warning(f"High error rate in sync: {error_rate:.1f}%")
             
         except Exception as e:
             logger.error(f"Error in sync_notion_tasks: {e}", exc_info=True)
