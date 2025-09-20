@@ -92,19 +92,13 @@ class TaskSyncService:
             
         logger.debug(f"Found employee ID: {employee_id}")
         
-        # Get or create employee sheet
+        # Try to access employee sheet - if it doesn't exist, skip this worker
         try:
             employee_sheet = self.sheets_service.sh.worksheet(employee_id)
-        except:
-            # Create new sheet if doesn't exist
-            employee_sheet = self.sheets_service.sh.add_worksheet(
-                title=employee_id, 
-                rows="1000", 
-                cols="15"
-            )
-            await self.sheets_service._initialize_employee_sheet(employee_sheet)
-            logger.info(f"Created new sheet for employee: {employee_id}")
-            
+        except Exception as sheet_error:
+            logger.warning(f"Cannot access employee sheet '{employee_id}': {sheet_error}")
+            return
+        
         # Get existing tasks to avoid duplicates
         existing_tasks = await self._get_existing_notion_tasks(employee_id)
         logger.debug(f"Found {len(existing_tasks)} existing Notion tasks for {employee_id}")
@@ -216,9 +210,9 @@ class TaskSyncService:
             tasks_values = employee_sheet.get(range_name)
             
             if not tasks_values:
-                # Initialize the sheet if no data exists
-                await self.sheets_service._initialize_employee_sheet(employee_sheet)
-                tasks_values = employee_sheet.get(range_name)
+                # Skip if no data exists (no sheet or empty sheet)
+                logger.warning(f"No tasks table found for employee {employee_sheet.title}, skipping task addition")
+                return False
                 
             # Find the next empty row
             next_row = start_row + len(tasks_values)

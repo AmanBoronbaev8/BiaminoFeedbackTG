@@ -235,8 +235,13 @@ class GoogleSheetsService:
     async def get_employee_active_tasks(self, employee_id: str) -> List[Dict]:
         """Get active (not completed) tasks for employee."""
         try:
-            employee_sheet = self.sh.worksheet(employee_id)
-            
+            # Try to access employee sheet - if it doesn't exist, return empty list
+            try:
+                employee_sheet = self.sh.worksheet(employee_id)
+            except Exception as sheet_error:
+                logger.warning(f"Cannot access employee sheet '{employee_id}': {sheet_error}")
+                return []
+
             # Get raw values for tasks table (columns A-E)
             start_row = self.config.tasks_table_start_row
             start_col = self.config.tasks_table_start_col
@@ -329,8 +334,13 @@ class GoogleSheetsService:
     async def get_existing_reports_for_date(self, employee_id: str, date: str) -> List[Dict]:
         """Get existing reports for a specific date."""
         try:
-            employee_sheet = self.sh.worksheet(employee_id)
-            
+            # Try to access employee sheet - if it doesn't exist, return empty list
+            try:
+                employee_sheet = self.sh.worksheet(employee_id)
+            except Exception as sheet_error:
+                logger.warning(f"Cannot access employee sheet '{employee_id}': {sheet_error}")
+                return []
+
             # Get reports table range (columns H-L)
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
@@ -413,18 +423,13 @@ class GoogleSheetsService:
             # Use empty string instead of None for task_id to ensure consistent handling
             task_id = task_id or ""
             
-            # Get or create employee sheet
+            # Try to access employee sheet - if it doesn't exist, skip saving
             try:
                 employee_sheet = self.sh.worksheet(employee_id)
-            except:
-                # Create new sheet if doesn't exist
-                employee_sheet = self.sh.add_worksheet(
-                    title=employee_id, 
-                    rows="1000", 
-                    cols="15"
-                )
-                await self._initialize_employee_sheet(employee_sheet)
-            
+            except Exception as sheet_error:
+                logger.warning(f"Cannot access employee sheet '{employee_id}' for saving report: {sheet_error}")
+                return False
+
             # Work with reports table (columns H-L)
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
@@ -436,13 +441,13 @@ class GoogleSheetsService:
             try:
                 reports_values = employee_sheet.get(reports_range)
             except:
-                # Reports table doesn't exist, create it
-                await self._ensure_reports_table_exists(employee_sheet)
-                reports_values = employee_sheet.get(reports_range)
+                # Reports table doesn't exist, skip
+                logger.warning(f"No reports table found for employee {employee_id}, skipping report save")
+                return False
             
             if not reports_values:
-                await self._ensure_reports_table_exists(employee_sheet)
-                reports_values = employee_sheet.get(reports_range)
+                logger.warning(f"Empty reports table for employee {employee_id}, skipping report save")
+                return False
                 
             # Get header row for reports table
             header_row = reports_values[0] if reports_values else []
@@ -511,56 +516,7 @@ class GoogleSheetsService:
             logger.error(f"Error saving daily report for {employee_id}: {e}")
             return False
             
-    async def _initialize_employee_sheet(self, employee_sheet) -> None:
-        """Initialize employee sheet with tasks and reports tables in parallel columns."""
-        # Tasks table headers (columns A-E)
-        tasks_headers = [
-            self.config.tasks_date_col,
-            self.config.tasks_id_col,
-            self.config.tasks_task_col,
-            self.config.tasks_deadline_col,
-            self.config.tasks_completed_col
-        ]
-        
-        # Add tasks table
-        tasks_start_row = self.config.tasks_table_start_row
-        tasks_start_col = self.config.tasks_table_start_col
-        tasks_end_col = chr(ord(tasks_start_col) + 4)  # A-E = 5 columns
-        tasks_range = f'{tasks_start_col}{tasks_start_row}:{tasks_end_col}{tasks_start_row}'
-        employee_sheet.update(tasks_range, [tasks_headers])
-        
-        # Reports table headers (columns H-L)
-        reports_headers = [
-            self.config.reports_date_col,
-            self.config.reports_task_id_col,
-            self.config.reports_feedback_col,
-            self.config.reports_difficulties_col,
-            self.config.reports_daily_report_col
-        ]
-        
-        # Add reports table
-        reports_start_row = self.config.reports_table_start_row
-        reports_start_col = self.config.reports_table_start_col
-        reports_end_col = chr(ord(reports_start_col) + 4)  # H-L = 5 columns
-        reports_range = f'{reports_start_col}{reports_start_row}:{reports_end_col}{reports_start_row}'
-        employee_sheet.update(reports_range, [reports_headers])
-        
-    async def _ensure_reports_table_exists(self, employee_sheet) -> None:
-        """Ensure reports table exists in employee sheet."""
-        # Add reports table headers (columns H-L)
-        reports_headers = [
-            self.config.reports_date_col,
-            self.config.reports_task_id_col,
-            self.config.reports_feedback_col,
-            self.config.reports_difficulties_col,
-            self.config.reports_daily_report_col
-        ]
-        
-        reports_start_row = self.config.reports_table_start_row
-        reports_start_col = self.config.reports_table_start_col
-        reports_end_col = chr(ord(reports_start_col) + 4)  # H-L = 5 columns
-        reports_range = f'{reports_start_col}{reports_start_row}:{reports_end_col}{reports_start_row}'
-        employee_sheet.update(reports_range, [reports_headers])
+
             
     async def check_report_submitted(self, employee_id: str, date: str = None) -> bool:
         """Check if employee has submitted reports for ALL incomplete tasks for the date OR has a general report.
@@ -602,7 +558,12 @@ class GoogleSheetsService:
                 return False
                 
             # Now check if all existing reports for this date are complete
-            employee_sheet = self.sh.worksheet(employee_id)
+            try:
+                employee_sheet = self.sh.worksheet(employee_id)
+            except Exception as sheet_error:
+                logger.warning(f"Cannot access employee sheet '{employee_id}' for checking reports: {sheet_error}")
+                return False
+
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
             reports_end_col = chr(ord(reports_start_col) + 4)
