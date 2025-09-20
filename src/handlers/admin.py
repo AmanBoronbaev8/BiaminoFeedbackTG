@@ -15,7 +15,8 @@ from ..utils import (
     parse_telegram_ids,
     is_admin,
     broadcast_to_employees,
-    send_tasks_to_employees
+    send_tasks_to_employees,
+    format_task_name
 )
 
 
@@ -585,7 +586,8 @@ async def admin_deadline_reminders(callback: CallbackQuery, sheets_service: Goog
                         # Format reminder message
                         task_list = []
                         for task in tasks_with_deadlines:
-                            task_list.append(f"• {task.get('task_id', '')}: {task.get('task', '')}")
+                            formatted_task = format_task_name(task.get('task', ''))
+                            task_list.append(f"• {formatted_task}")
                         
                         tasks_text = "\n".join(task_list)
                         

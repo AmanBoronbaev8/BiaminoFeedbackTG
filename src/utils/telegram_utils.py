@@ -194,11 +194,11 @@ async def send_tasks_to_employees(
             # New format: list of task dictionaries
             task_lines = []
             for task in tasks:
-                task_id = task.get('task_id', '')
                 task_text = task.get('task', '')
                 deadline = task.get('deadline', '')
                 deadline_part = f" (до {deadline})" if deadline else ""
-                task_lines.append(f"• <b>{task_id}:</b> {task_text}{deadline_part}")
+                formatted_task = format_task_name(task_text)
+                task_lines.append(f"• {formatted_task}{deadline_part}")
             
             if task_lines:
                 tasks_text = "\n".join(task_lines)
@@ -232,6 +232,27 @@ async def send_tasks_to_employees(
         await asyncio.sleep(rate_limit_delay)
         
     return sent_count, failed_count
+
+
+def format_task_name(task_text: str, max_length: int = 50) -> str:
+    """
+    Format task name by truncating to max_length and adding ellipsis if needed.
+    
+    Args:
+        task_text: Original task text
+        max_length: Maximum length (default 50)
+        
+    Returns:
+        Formatted task text
+    """
+    if not task_text:
+        return ""
+    
+    task_text = task_text.strip()
+    if len(task_text) <= max_length:
+        return task_text
+    
+    return task_text[:max_length] + "..."
 
 
 def is_admin(user_id: int, config) -> bool:

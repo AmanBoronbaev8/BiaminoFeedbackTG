@@ -12,7 +12,7 @@ from loguru import logger
 from ..config_data import Config
 from ..services import GoogleSheetsService
 from ..states import ReportStates
-from ..utils.telegram_utils import parse_telegram_ids, is_admin
+from ..utils.telegram_utils import parse_telegram_ids, is_admin, format_task_name
 
 
 user_router = Router()
@@ -175,11 +175,11 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
         for task in tasks_without_reports:
             task_id = task.get('task_id', '')
             task_text = task.get('task', '')
-            task_preview = task_text[:30] + '...' if len(task_text) > 30 else task_text
+            task_preview = format_task_name(task_text)
             
             builder.row(
                 InlineKeyboardButton(
-                    text=f"🔸 {task_id}: {task_preview}", 
+                    text=f"🔸 {task_preview}", 
                     callback_data=f"select_task_{task_id}"
                 )
             )
@@ -208,7 +208,8 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
         for i, task in enumerate(tasks_without_reports, 1):
             deadline = task.get('deadline', '')
             deadline_text = f" (до {deadline})" if deadline else ""
-            task_text += f"{i}. <b>{task.get('task_id', '')}:</b> {task.get('task', '')}{deadline_text}\n"
+            formatted_task = format_task_name(task.get('task', ''))
+            task_text += f"{i}. {formatted_task}{deadline_text}\n"
             
         task_text += "\n📝 Или создайте общий отчет без привязки к конкретной задаче."
     else:
@@ -272,9 +273,9 @@ async def select_task_for_report(callback: CallbackQuery, state: FSMContext):
         await state.update_data(selected_task=selected_task)
         
         # Show task details and start feedback collection
+        formatted_task = format_task_name(selected_task.get('task', ''))
         task_details = (
-            f"Выбрана задача: <b>{task_id}</b>\n\n"
-            f"<b>Описание:</b> {selected_task.get('task', '')}\n"
+            f"Выбрана задача: <b>{formatted_task}</b>\n\n"
         )
         
         if selected_task.get('deadline'):
@@ -429,7 +430,9 @@ async def confirm_report(callback: CallbackQuery, state: FSMContext, sheets_serv
         
         if success:
             if task_id:
-                success_message = f"Ваш отчет по задаче <b>{task_id}</b> успешно сохранен. Спасибо! ✅"
+                # Format task name for success message
+                formatted_task = format_task_name(selected_task.get('task', ''))
+                success_message = f"Ваш отчет по задаче <b>{formatted_task}</b> успешно сохранен. Спасибо! ✅"
             else:
                 success_message = "Ваш общий отчет успешно сохранен. Спасибо! ✅"
                 

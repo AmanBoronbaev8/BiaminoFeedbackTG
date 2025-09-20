@@ -6,7 +6,8 @@ from .telegram_utils import (
     send_message_safe,
     broadcast_to_employees,
     send_tasks_to_employees,
-    is_admin
+    is_admin,
+    format_task_name
 )
 from .callback_utils import handle_long_operation, with_progress_updates, CallbackTimeout
 
@@ -18,6 +19,7 @@ __all__ = [
     "broadcast_to_employees",
     "send_tasks_to_employees",
     "is_admin",
+    "format_task_name",
     "handle_long_operation",
     "with_progress_updates",
     "CallbackTimeout"
