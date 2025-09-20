@@ -156,7 +156,6 @@ async def cmd_report(message: Message, state: FSMContext, sheets_service: Google
 async def start_report_collection(message: Message, state: FSMContext, sheets_service: GoogleSheetsService = None, tasks_without_reports: List[Dict] = None):
     """Start the report collection process with task selection or without tasks."""
     if not sheets_service:
-        # Get sheets_service from state if not provided (for callback scenarios)
         await message.answer("Произошла ошибка. Попробуйте команду /report еще раз.")
         return
         
@@ -177,12 +176,29 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
             task_text = task.get('task', '')
             task_preview = format_task_name(task_text)
             
+            # Sanitize and truncate task_id for callback_data
+            max_task_id_length = 50  # Reserve space for "select_task_" (12 bytes) + margin
+            sanitized_task_id = ''.join(c for c in task_id if c.isalnum() or c in ['-', '_'])  # Only alphanumeric and safe chars
+            if not sanitized_task_id:
+                logger.warning(f"Task ID '{task_id}' is empty or contains only invalid characters, skipping")
+                continue
+                
+            # Truncate to ensure callback_data is under 64 bytes
+            while len(f"select_task_{sanitized_task_id}".encode('utf-8')) > 64 and sanitized_task_id:
+                sanitized_task_id = sanitized_task_id[:-1]
+                logger.debug(f"Truncated task_id to '{sanitized_task_id}' to fit callback_data limit")
+            
+            if not sanitized_task_id:
+                logger.warning(f"Task ID '{task_id}' could not be used after sanitization, skipping")
+                continue
+                
             builder.row(
                 InlineKeyboardButton(
                     text=f"🔸 {task_preview}", 
-                    callback_data=f"select_task_{task_id}"
+                    callback_data=f"select_task_{sanitized_task_id}"
                 )
             )
+            logger.debug(f"Added button for task_id: {sanitized_task_id}, original: {task_id}")
     
     # Always add option for general report (without task)
     builder.row(
