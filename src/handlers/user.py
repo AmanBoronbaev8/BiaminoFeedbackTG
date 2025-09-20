@@ -1,6 +1,7 @@
 """User handlers for employee functionality."""
 import html
 from datetime import datetime
+from typing import Dict, List
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -127,19 +128,15 @@ async def cmd_report(message: Message, state: FSMContext, sheets_service: Google
         # Get tasks that don't have reports for today
         tasks_without_reports = await sheets_service.get_tasks_without_reports_today(employee_id)
         
-        if not tasks_without_reports:
-            await message.answer("Вы уже сдали отчеты по всем активным задачам за сегодня! ✅")
-            return
-            
-        await start_report_collection(message, state, sheets_service)
+        await start_report_collection(message, state, sheets_service, tasks_without_reports)
         
     except Exception as e:
         logger.error(f"Error handling report command: {e}")
         await message.answer("Произошла ошибка. Попробуйте еще раз.")
 
 
-async def start_report_collection(message: Message, state: FSMContext, sheets_service: GoogleSheetsService = None):
-    """Start the report collection process with task selection."""
+async def start_report_collection(message: Message, state: FSMContext, sheets_service: GoogleSheetsService = None, tasks_without_reports: List[Dict] = None):
+    """Start the report collection process with task selection or without tasks."""
     if not sheets_service:
         # Get sheets_service from state if not provided (for callback scenarios)
         await message.answer("Произошла ошибка. Попробуйте команду /report еще раз.")
@@ -148,30 +145,34 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
     data = await state.get_data()
     employee_id = data.get("employee_id", "")
     
-    # Get tasks that don't have reports for today
-    tasks_without_reports = await sheets_service.get_tasks_without_reports_today(employee_id)
+    # Get tasks if not provided
+    if tasks_without_reports is None:
+        tasks_without_reports = await sheets_service.get_tasks_without_reports_today(employee_id)
     
-    if not tasks_without_reports:
-        await message.answer(
-            "У вас нет задач, по которым нужно сдать отчет за сегодня.\n\n"
-            "Либо вы уже сдали отчеты по всем активным задачам, либо нет активных задач."
-        )
-        return
-        
     # Create task selection keyboard
     builder = InlineKeyboardBuilder()
     
-    for task in tasks_without_reports:
-        task_id = task.get('task_id', '')
-        task_text = task.get('task', '')
-        task_preview = task_text[:30] + '...' if len(task_text) > 30 else task_text
-        
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🔸 {task_id}: {task_preview}", 
-                callback_data=f"select_task_{task_id}"
+    # Add tasks if available
+    if tasks_without_reports:
+        for task in tasks_without_reports:
+            task_id = task.get('task_id', '')
+            task_text = task.get('task', '')
+            task_preview = task_text[:30] + '...' if len(task_text) > 30 else task_text
+            
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"🔸 {task_id}: {task_preview}", 
+                    callback_data=f"select_task_{task_id}"
+                )
             )
+    
+    # Always add option for general report (without task)
+    builder.row(
+        InlineKeyboardButton(
+            text="📝 Общий отчет (без задачи)", 
+            callback_data="select_general_report"
         )
+    )
     
     builder.row(
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")
@@ -180,18 +181,53 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
     # Store tasks in state for later use
     await state.update_data(available_tasks=tasks_without_reports)
     
-    task_text = (
-        "Выберите задачу для создания отчета:\n\n"
-        "📋 <b>Задачи, по которым нужно сдать отчет:</b>\n"
-    )
-    
-    for i, task in enumerate(tasks_without_reports, 1):
-        deadline = task.get('deadline', '')
-        deadline_text = f" (до {deadline})" if deadline else ""
-        task_text += f"{i}. <b>{task.get('task_id', '')}:</b> {task.get('task', '')}{deadline_text}\n"
+    if tasks_without_reports:
+        task_text = (
+            "Выберите задачу для создания отчета или создайте общий отчет:\n\n"
+            "📋 <b>Задачи, по которым нужно сдать отчет:</b>\n"
+        )
+        
+        for i, task in enumerate(tasks_without_reports, 1):
+            deadline = task.get('deadline', '')
+            deadline_text = f" (до {deadline})" if deadline else ""
+            task_text += f"{i}. <b>{task.get('task_id', '')}:</b> {task.get('task', '')}{deadline_text}\n"
+            
+        task_text += "\n📝 Или создайте общий отчет без привязки к конкретной задаче."
+    else:
+        task_text = (
+            "У вас нет активных задач, требующих отчета.\n\n"
+            "📝 Вы можете создать общий отчет за день."
+        )
     
     await message.answer(task_text, parse_mode="HTML", reply_markup=builder.as_markup())
     await state.set_state(ReportStates.selecting_task)
+
+
+@user_router.callback_query(F.data == "select_general_report", ReportStates.selecting_task)
+async def select_general_report(callback: CallbackQuery, state: FSMContext):
+    """Handle selection of general report (without specific task)."""
+    try:
+        # Store that this is a general report
+        await state.update_data(selected_task={"task_id": "", "task": "Общий отчет"})
+        
+        # Show message for general report
+        general_report_text = (
+            "📝 <b>Общий отчет за день</b>\n\n"
+            "🔹 Расскажите, как прошел ваш рабочий день? "
+            "Какие задачи выполняли, с какими нюансами столкнулись?"
+        )
+        
+        await callback.message.edit_text(
+            general_report_text, 
+            parse_mode="HTML", 
+            reply_markup=None
+        )
+        await state.set_state(ReportStates.waiting_for_feedback)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in general report selection: {e}")
+        await callback.answer("Произошла ошибка!", show_alert=True)
 
 
 @user_router.callback_query(F.data.startswith("select_task_"), ReportStates.selecting_task)
@@ -359,27 +395,32 @@ async def confirm_report(callback: CallbackQuery, state: FSMContext, sheets_serv
         difficulties = data.get("difficulties", "")
         daily_report = data.get("daily_report", "")
         
-        if not task_id:
+        if not task_id and not feedback.strip():
             await callback.message.edit_text(
-                "Ошибка: не выбрана задача. Попробуйте заново.",
+                "Ошибка: для общего отчета необходимо заполнить хотя бы одно поле. Попробуйте заново.",
                 reply_markup=None
             )
             await state.clear()
             await callback.answer()
             return
         
-        # Save to Google Sheets with task_id
+        # Save to Google Sheets with task_id (empty for general reports)
         success = await sheets_service.save_daily_report(
             employee_id, task_id, feedback, difficulties, daily_report
         )
         
         if success:
+            if task_id:
+                success_message = f"Ваш отчет по задаче <b>{task_id}</b> успешно сохранен. Спасибо! ✅"
+            else:
+                success_message = "Ваш общий отчет успешно сохранен. Спасибо! ✅"
+                
             await callback.message.edit_text(
-                f"Ваш отчет по задаче <b>{task_id}</b> успешно сохранен. Спасибо! ✅",
+                success_message,
                 parse_mode="HTML",
                 reply_markup=None
             )
-            logger.info(f"Report saved for employee {employee_id}, task {task_id}")
+            logger.info(f"Report saved for employee {employee_id}, task_id: '{task_id}'")
         else:
             await callback.message.edit_text(
                 "Произошла ошибка при сохранении отчета. Попробуйте еще раз.",

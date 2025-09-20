@@ -398,9 +398,20 @@ class GoogleSheetsService:
             return []
             
     async def save_daily_report(self, employee_id: str, task_id: str, feedback: str, difficulties: str, daily_report: str) -> bool:
-        """Save daily report to employee's sheet reports table."""
+        """Save daily report to employee's sheet reports table.
+        
+        Args:
+            employee_id: Employee ID
+            task_id: Task ID (can be empty string for general reports)
+            feedback: Feedback text
+            difficulties: Difficulties text
+            daily_report: Daily report text
+        """
         try:
             today = datetime.now().strftime("%d.%m.%Y")
+            
+            # Use empty string instead of None for task_id to ensure consistent handling
+            task_id = task_id or ""
             
             # Get or create employee sheet
             try:
@@ -455,21 +466,24 @@ class GoogleSheetsService:
                 logger.error(f"Missing required report columns in sheet {employee_id}")
                 return False
             
-            # Find existing row for today and this task_id
+            # For general reports (empty task_id), always create new row
+            # For task-specific reports, check for existing entry
             row_to_update = None
-            for i, row in enumerate(reports_values[1:], start=2):  # Start from row 2 (1-indexed from reports start)
-                if (len(row) > max(date_col, task_id_col) and 
-                    row[date_col] == today and 
-                    row[task_id_col] == task_id):
-                    row_to_update = reports_start_row + i - 1  # Convert to absolute row number
-                    break
-                    
+            if task_id:  # Only check for existing entry if task_id is not empty
+                for i, row in enumerate(reports_values[1:], start=2):  # Start from row 2 (1-indexed from reports start)
+                    if (len(row) > max(date_col, task_id_col) and 
+                        row[date_col] == today and 
+                        row[task_id_col] == task_id):
+                        row_to_update = reports_start_row + i - 1  # Convert to absolute row number
+                        break
+                        
             if row_to_update:
                 # Update existing row
                 feedback_col_abs = chr(ord(reports_start_col) + feedback_col)
                 daily_report_col_abs = chr(ord(reports_start_col) + daily_report_col)
                 update_range = f'{feedback_col_abs}{row_to_update}:{daily_report_col_abs}{row_to_update}'
                 employee_sheet.update(update_range, [[feedback, difficulties, daily_report]])
+                logger.info(f"Updated existing report for {employee_id}, task: '{task_id}'")
             else:
                 # Find next empty row in reports table
                 next_row = reports_start_row + len(reports_values)
@@ -477,7 +491,7 @@ class GoogleSheetsService:
                 # Create new row data
                 new_row = [''] * 5  # 5 columns for reports table
                 new_row[date_col] = today
-                new_row[task_id_col] = task_id
+                new_row[task_id_col] = task_id  # Will be empty string for general reports
                 new_row[feedback_col] = feedback
                 new_row[difficulties_col] = difficulties
                 new_row[daily_report_col] = daily_report
@@ -486,7 +500,11 @@ class GoogleSheetsService:
                 update_range = f'{reports_start_col}{next_row}:{reports_end_col}{next_row}'
                 employee_sheet.update(update_range, [new_row])
                 
-            logger.info(f"Saved daily report for {employee_id} task {task_id} on {today}")
+                if task_id:
+                    logger.info(f"Saved daily report for {employee_id} task {task_id} on {today}")
+                else:
+                    logger.info(f"Saved general daily report for {employee_id} on {today}")
+                
             return True
             
         except Exception as e:
@@ -545,10 +563,12 @@ class GoogleSheetsService:
         employee_sheet.update(reports_range, [reports_headers])
             
     async def check_report_submitted(self, employee_id: str, date: str = None) -> bool:
-        """Check if employee has submitted reports for ALL incomplete tasks for the date.
+        """Check if employee has submitted reports for ALL incomplete tasks for the date OR has a general report.
         
         This is used for general reporting status (e.g., reminders).
-        Returns True if reports exist for all incomplete tasks for the date.
+        Returns True if:
+        1. Reports exist for all incomplete tasks for the date, OR
+        2. At least one general report (empty task_id) exists for the date
         """
         if date is None:
             date = datetime.now().strftime("%d.%m.%Y")
@@ -556,14 +576,23 @@ class GoogleSheetsService:
         try:
             # Get all active (incomplete) tasks for this employee
             active_tasks = await self.get_employee_active_tasks(employee_id)
-            if not active_tasks:
-                # If no active tasks, consider reports as "submitted"
-                return True
-                
+            
             # Get existing reports for the date
             existing_reports = await self.get_existing_reports_for_date(employee_id, date)
             reported_task_ids = {report.get('task_id') for report in existing_reports}
             
+            # Check for general reports (empty task_id)
+            has_general_report = '' in reported_task_ids
+            
+            # If there's a general report, consider reports as submitted
+            if has_general_report:
+                logger.debug(f"Employee {employee_id} has general report for {date}")
+                return True
+            
+            # If no active tasks, consider reports as "submitted"
+            if not active_tasks:
+                return True
+                
             # Check if reports exist for all active tasks
             active_task_ids = {task.get('task_id') for task in active_tasks}
             missing_reports = active_task_ids - reported_task_ids
