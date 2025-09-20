@@ -49,12 +49,12 @@ class BotScheduler:
             id='deadline_reminders'
         )
         
-        # Schedule Notion task sync every 15 minutes
-        self.scheduler.add_job(
-            self.sync_notion_tasks,
-            CronTrigger(minute='*/15', timezone=current_timezone),  # Every 15 minutes
-            id='notion_task_sync'
-        )
+        # Schedule Notion task sync every 15 minutes - DISABLED for read-only sheets
+        # self.scheduler.add_job(
+        #     self.sync_notion_tasks,
+        #     CronTrigger(minute='*/15', timezone=current_timezone),  # Every 15 minutes
+        #     id='notion_task_sync'
+        # )
         
         self.scheduler.start()
         logger.info("Scheduler started with Moscow timezone")

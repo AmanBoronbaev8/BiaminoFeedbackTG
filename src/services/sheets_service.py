@@ -24,6 +24,28 @@ class GoogleSheetsService:
         self._cache_timestamp = None
         self._cache_ttl = 300  # 5 minutes cache TTL
         
+    async def check_sheets_availability(self) -> bool:
+        """Check if Google Sheets service is available and not in read-only mode."""
+        try:
+            # Try a simple read operation on the team sheet
+            team_sheet = self.sh.worksheet(self.config.team_sheet_name)
+            
+            # Try to get just the first row (headers) to minimize API usage
+            test_read = team_sheet.get('A1:Z1')
+            
+            if test_read:
+                logger.debug("Google Sheets service is available")
+                return True
+            else:
+                logger.warning("Google Sheets returned empty data - service may be unavailable")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Google Sheets availability check failed: {e}")
+            if "read only replica" in str(e).lower():
+                logger.error("Google Sheets is in read-only replica mode")
+            return False
+            
     async def initialize(self) -> None:
         """Initialize Google Sheets connection."""
         try:
@@ -92,8 +114,27 @@ class GoogleSheetsService:
         """Get employee data by TelegramID from team sheet."""
         try:
             logger.debug(f"Getting employee data for TelegramID: {telegram_id}")
-            team_sheet = self.sh.worksheet(self.config.team_sheet_name)
-            all_values = team_sheet.get_all_values()
+            
+            # Try to get the team sheet with additional error handling
+            try:
+                team_sheet = self.sh.worksheet(self.config.team_sheet_name)
+            except Exception as sheet_error:
+                logger.error(f"Failed to access team sheet '{self.config.team_sheet_name}': {sheet_error}")
+                # Check if it's a read-only replica error
+                if "read only replica" in str(sheet_error).lower():
+                    logger.error("Google Sheets is in read-only mode - cannot access employee data")
+                    return None
+                raise
+            
+            # Get all values with error handling
+            try:
+                all_values = team_sheet.get_all_values()
+            except Exception as read_error:
+                logger.error(f"Failed to read team sheet data: {read_error}")
+                if "read only replica" in str(read_error).lower():
+                    logger.error("Google Sheets is in read-only mode - cannot read employee data")
+                    return None
+                raise
             
             if not all_values or len(all_values) < 2:
                 logger.debug("No data found in team sheet")
@@ -128,6 +169,9 @@ class GoogleSheetsService:
             
         except Exception as e:
             logger.error(f"Error getting employee data by TelegramID: {e}")
+            # If it's a read-only replica error, provide more specific guidance
+            if "read only replica" in str(e).lower():
+                logger.error("Google Sheets read-only replica error - this usually means the sheet is temporarily in read-only mode")
             return None
             
     def _is_cache_valid(self) -> bool:
@@ -141,8 +185,29 @@ class GoogleSheetsService:
     async def _refresh_employees_cache(self) -> List[Dict]:
         """Refresh the employees cache with fresh data."""
         try:
-            team_sheet = self.sh.worksheet(self.config.team_sheet_name)
-            all_values = team_sheet.get_all_values()
+            # Get team sheet with error handling
+            try:
+                team_sheet = self.sh.worksheet(self.config.team_sheet_name)
+            except Exception as sheet_error:
+                logger.error(f"Failed to access team sheet '{self.config.team_sheet_name}': {sheet_error}")
+                if "read only replica" in str(sheet_error).lower():
+                    logger.error("Google Sheets is in read-only mode - cannot refresh employee cache")
+                    self._employees_cache = []
+                    self._cache_timestamp = datetime.now().timestamp()
+                    return []
+                raise
+            
+            # Get all values with error handling
+            try:
+                all_values = team_sheet.get_all_values()
+            except Exception as read_error:
+                logger.error(f"Failed to read team sheet data: {read_error}")
+                if "read only replica" in str(read_error).lower():
+                    logger.error("Google Sheets is in read-only mode - cannot refresh employee cache")
+                    self._employees_cache = []
+                    self._cache_timestamp = datetime.now().timestamp()
+                    return []
+                raise
             
             if not all_values or len(all_values) < 2:
                 logger.info("No employee data found in team sheet")
@@ -173,6 +238,8 @@ class GoogleSheetsService:
             
         except Exception as e:
             logger.error(f"Error refreshing employee cache: {e}")
+            if "read only replica" in str(e).lower():
+                logger.error("Google Sheets read-only replica error during cache refresh")
             self._employees_cache = []
             self._cache_timestamp = datetime.now().timestamp()
             return []
@@ -235,13 +302,8 @@ class GoogleSheetsService:
     async def get_employee_active_tasks(self, employee_id: str) -> List[Dict]:
         """Get active (not completed) tasks for employee."""
         try:
-            # Try to access employee sheet - if it doesn't exist, return empty list
-            try:
-                employee_sheet = self.sh.worksheet(employee_id)
-            except Exception as sheet_error:
-                logger.warning(f"Cannot access employee sheet '{employee_id}': {sheet_error}")
-                return []
-
+            employee_sheet = self.sh.worksheet(employee_id)
+            
             # Get raw values for tasks table (columns A-E)
             start_row = self.config.tasks_table_start_row
             start_col = self.config.tasks_table_start_col
@@ -334,13 +396,8 @@ class GoogleSheetsService:
     async def get_existing_reports_for_date(self, employee_id: str, date: str) -> List[Dict]:
         """Get existing reports for a specific date."""
         try:
-            # Try to access employee sheet - if it doesn't exist, return empty list
-            try:
-                employee_sheet = self.sh.worksheet(employee_id)
-            except Exception as sheet_error:
-                logger.warning(f"Cannot access employee sheet '{employee_id}': {sheet_error}")
-                return []
-
+            employee_sheet = self.sh.worksheet(employee_id)
+            
             # Get reports table range (columns H-L)
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
@@ -423,13 +480,13 @@ class GoogleSheetsService:
             # Use empty string instead of None for task_id to ensure consistent handling
             task_id = task_id or ""
             
-            # Try to access employee sheet - if it doesn't exist, skip saving
+            # Get employee sheet (skip if doesn't exist to avoid read-only replica errors)
             try:
                 employee_sheet = self.sh.worksheet(employee_id)
-            except Exception as sheet_error:
-                logger.warning(f"Cannot access employee sheet '{employee_id}' for saving report: {sheet_error}")
+            except:
+                logger.warning(f"Employee sheet {employee_id} not found - skipping report save to avoid read-only replica error")
                 return False
-
+            
             # Work with reports table (columns H-L)
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
@@ -441,13 +498,13 @@ class GoogleSheetsService:
             try:
                 reports_values = employee_sheet.get(reports_range)
             except:
-                # Reports table doesn't exist, skip
-                logger.warning(f"No reports table found for employee {employee_id}, skipping report save")
-                return False
+                # Reports table doesn't exist, create it
+                await self._ensure_reports_table_exists(employee_sheet)
+                reports_values = employee_sheet.get(reports_range)
             
             if not reports_values:
-                logger.warning(f"Empty reports table for employee {employee_id}, skipping report save")
-                return False
+                await self._ensure_reports_table_exists(employee_sheet)
+                reports_values = employee_sheet.get(reports_range)
                 
             # Get header row for reports table
             header_row = reports_values[0] if reports_values else []
@@ -516,7 +573,56 @@ class GoogleSheetsService:
             logger.error(f"Error saving daily report for {employee_id}: {e}")
             return False
             
-
+    async def _initialize_employee_sheet(self, employee_sheet) -> None:
+        """Initialize employee sheet with tasks and reports tables in parallel columns."""
+        # Tasks table headers (columns A-E)
+        tasks_headers = [
+            self.config.tasks_date_col,
+            self.config.tasks_id_col,
+            self.config.tasks_task_col,
+            self.config.tasks_deadline_col,
+            self.config.tasks_completed_col
+        ]
+        
+        # Add tasks table
+        tasks_start_row = self.config.tasks_table_start_row
+        tasks_start_col = self.config.tasks_table_start_col
+        tasks_end_col = chr(ord(tasks_start_col) + 4)  # A-E = 5 columns
+        tasks_range = f'{tasks_start_col}{tasks_start_row}:{tasks_end_col}{tasks_start_row}'
+        employee_sheet.update(tasks_range, [tasks_headers])
+        
+        # Reports table headers (columns H-L)
+        reports_headers = [
+            self.config.reports_date_col,
+            self.config.reports_task_id_col,
+            self.config.reports_feedback_col,
+            self.config.reports_difficulties_col,
+            self.config.reports_daily_report_col
+        ]
+        
+        # Add reports table
+        reports_start_row = self.config.reports_table_start_row
+        reports_start_col = self.config.reports_table_start_col
+        reports_end_col = chr(ord(reports_start_col) + 4)  # H-L = 5 columns
+        reports_range = f'{reports_start_col}{reports_start_row}:{reports_end_col}{reports_start_row}'
+        employee_sheet.update(reports_range, [reports_headers])
+        
+    async def _ensure_reports_table_exists(self, employee_sheet) -> None:
+        """Ensure reports table exists in employee sheet."""
+        # Add reports table headers (columns H-L)
+        reports_headers = [
+            self.config.reports_date_col,
+            self.config.reports_task_id_col,
+            self.config.reports_feedback_col,
+            self.config.reports_difficulties_col,
+            self.config.reports_daily_report_col
+        ]
+        
+        reports_start_row = self.config.reports_table_start_row
+        reports_start_col = self.config.reports_table_start_col
+        reports_end_col = chr(ord(reports_start_col) + 4)  # H-L = 5 columns
+        reports_range = f'{reports_start_col}{reports_start_row}:{reports_end_col}{reports_start_row}'
+        employee_sheet.update(reports_range, [reports_headers])
             
     async def check_report_submitted(self, employee_id: str, date: str = None) -> bool:
         """Check if employee has submitted reports for ALL incomplete tasks for the date OR has a general report.
@@ -558,12 +664,7 @@ class GoogleSheetsService:
                 return False
                 
             # Now check if all existing reports for this date are complete
-            try:
-                employee_sheet = self.sh.worksheet(employee_id)
-            except Exception as sheet_error:
-                logger.warning(f"Cannot access employee sheet '{employee_id}' for checking reports: {sheet_error}")
-                return False
-
+            employee_sheet = self.sh.worksheet(employee_id)
             reports_start_row = self.config.reports_table_start_row
             reports_start_col = self.config.reports_table_start_col
             reports_end_col = chr(ord(reports_start_col) + 4)
