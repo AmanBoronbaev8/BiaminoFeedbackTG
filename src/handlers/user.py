@@ -18,6 +18,46 @@ from ..utils.telegram_utils import parse_telegram_ids, is_admin
 user_router = Router()
 
 
+def safe_callback_data(data: str, max_length: int = 64) -> str:
+    """
+    Ensure callback data is safe for Telegram (max 64 bytes).
+    
+    Args:
+        data: The callback data string
+        max_length: Maximum allowed length in bytes
+        
+    Returns:
+        Safe callback data string
+    """
+    # Encode to bytes and check length
+    data_bytes = data.encode('utf-8')
+    if len(data_bytes) <= max_length:
+        return data
+    
+    # If too long, truncate safely
+    # Keep truncating until it fits
+    while len(data.encode('utf-8')) > max_length:
+        data = data[:-1]
+    
+    return data
+
+
+def truncate_task_name(task_name: str, max_length: int = 50) -> str:
+    """
+    Truncate task name to specified length with ellipsis.
+    
+    Args:
+        task_name: The task name to truncate
+        max_length: Maximum allowed length (default: 50)
+        
+    Returns:
+        Truncated task name with '...' if needed
+    """
+    if len(task_name) > max_length:
+        return task_name[:max_length] + "..."
+    return task_name
+
+
 async def auto_authenticate_user(message: Message, state: FSMContext, sheets_service: GoogleSheetsService, config: Config = None) -> bool:
     """Automatically authenticate user based on TelegramID."""
     try:
@@ -154,15 +194,20 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
     
     # Add tasks if available
     if tasks_without_reports:
-        for task in tasks_without_reports:
-            task_id = task.get('task_id', '')
+        for i, task in enumerate(tasks_without_reports):
             task_text = task.get('task', '')
-            task_preview = task_text[:30] + '...' if len(task_text) > 30 else task_text
+            
+            # Truncate task name to max 50 characters for display
+            task_preview = truncate_task_name(task_text)
+            
+            # Use index-based callback data to avoid length issues
+            # This ensures callback_data is always short and valid
+            callback_data = safe_callback_data(f"task_{i}")
             
             builder.row(
                 InlineKeyboardButton(
-                    text=f"🔸 {task_id}: {task_preview}", 
-                    callback_data=f"select_task_{task_id}"
+                    text=f"🔸 {task_preview}", 
+                    callback_data=callback_data
                 )
             )
     
@@ -188,9 +233,14 @@ async def start_report_collection(message: Message, state: FSMContext, sheets_se
         )
         
         for i, task in enumerate(tasks_without_reports, 1):
+            task_text = task.get('task', '')
             deadline = task.get('deadline', '')
             deadline_text = f" (до {deadline})" if deadline else ""
-            task_text += f"{i}. <b>{task.get('task_id', '')}:</b> {task.get('task', '')}{deadline_text}\n"
+            
+            # Truncate task name to 50 characters for display
+            task_display = truncate_task_name(task_text)
+                
+            task_text += f"{i}. {task_display}{deadline_text}\n"
             
         task_text += "\n📝 Или создайте общий отчет без привязки к конкретной задаче."
     else:
@@ -230,33 +280,35 @@ async def select_general_report(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Произошла ошибка!", show_alert=True)
 
 
-@user_router.callback_query(F.data.startswith("select_task_"), ReportStates.selecting_task)
+@user_router.callback_query(F.data.startswith("task_"), ReportStates.selecting_task)
 async def select_task_for_report(callback: CallbackQuery, state: FSMContext):
-    """Handle task selection for report."""
+    """Handle task selection for report using index-based callback data."""
     try:
-        task_id = callback.data.split("_", 2)[2]
+        # Extract task index from callback data (format: "task_0", "task_1", etc.)
+        task_index_str = callback.data.split("_")[1]
+        task_index = int(task_index_str)
         
-        # Get task details from stored available tasks
+        # Get task details from stored available tasks using index
         data = await state.get_data()
         available_tasks = data.get("available_tasks", [])
         
-        selected_task = None
-        for task in available_tasks:
-            if task.get('task_id') == task_id:
-                selected_task = task
-                break
-                
-        if not selected_task:
+        if task_index >= len(available_tasks) or task_index < 0:
             await callback.answer("Задача не найдена!", show_alert=True)
             return
             
+        selected_task = available_tasks[task_index]
+        task_name = selected_task.get('task', '')
+        
         # Store selected task
         await state.update_data(selected_task=selected_task)
         
+        # Truncate task name for display if too long
+        task_display = truncate_task_name(task_name)
+        
         # Show task details and start feedback collection
         task_details = (
-            f"Выбрана задача: <b>{task_id}</b>\n\n"
-            f"<b>Описание:</b> {selected_task.get('task', '')}\n"
+            f"Выбрана задача: <b>{task_display}</b>\n\n"
+            f"<b>Описание:</b> {task_name}\n"
         )
         
         if selected_task.get('deadline'):
@@ -275,6 +327,9 @@ async def select_task_for_report(callback: CallbackQuery, state: FSMContext):
         await state.set_state(ReportStates.waiting_for_feedback)
         await callback.answer()
         
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing task index from callback: {callback.data}, error: {e}")
+        await callback.answer("Некорректные данные задачи!", show_alert=True)
     except Exception as e:
         logger.error(f"Error in task selection: {e}")
         await callback.answer("Произошла ошибка!", show_alert=True)

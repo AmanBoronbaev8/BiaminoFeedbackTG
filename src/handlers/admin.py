@@ -277,14 +277,26 @@ async def select_all_employees(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "send_to_selected", AdminStates.selecting_employees_for_tasks)
 async def send_tasks_to_selected(callback: CallbackQuery, state: FSMContext, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
     """Send tasks to selected employees."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
         data = await state.get_data()
         selected_employees = data.get("selected_employees", [])
         employees_with_tasks = data.get("employees_with_tasks", [])
         
         if not selected_employees:
-            await callback.answer("Не выбран ни один сотрудник!", show_alert=True)
+            await callback.message.edit_text(
+                "Не выбран ни один сотрудник!",
+                reply_markup=None
+            )
             return
+        
+        # Show initial processing message
+        await callback.message.edit_text(
+            f"📤 Отправляю задачи {len(selected_employees)} сотрудникам...",
+            reply_markup=None
+        )
             
         # Filter selected employees
         selected_employee_data = [
@@ -303,7 +315,6 @@ async def send_tasks_to_selected(callback: CallbackQuery, state: FSMContext, she
         
         await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=None)
         await state.clear()
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error sending tasks to selected employees: {e}")
@@ -329,7 +340,16 @@ async def cancel_task_selection(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "admin_remind_pending")
 async def admin_remind_pending(callback: CallbackQuery, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
     """Remind employees who haven't submitted reports for ALL their incomplete tasks."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
+        # Show initial processing message
+        await callback.message.edit_text(
+            "⏰ Проверяю отчеты сотрудников...",
+            reply_markup=None
+        )
+        
         today = datetime.now().strftime("%d.%m.%Y")
         logger.info(f"Admin triggered report reminders for date: {today}")
         
@@ -367,7 +387,6 @@ async def admin_remind_pending(callback: CallbackQuery, sheets_service: GoogleSh
             reply_markup=None,
             parse_mode="HTML"
         )
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error sending reminders: {e}", exc_info=True)
@@ -375,13 +394,21 @@ async def admin_remind_pending(callback: CallbackQuery, sheets_service: GoogleSh
             f"Произошла ошибка при отправке напоминаний: {str(e)}",
             reply_markup=None
         )
-        await callback.answer()
 
 
 @admin_router.callback_query(F.data == "admin_remind_all")
 async def admin_remind_all(callback: CallbackQuery, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
     """Remind all employees about reports."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
+        # Show initial processing message
+        await callback.message.edit_text(
+            "📢 Отправляю напоминания всем сотрудникам...",
+            reply_markup=None
+        )
+        
         employees = await sheets_service.get_all_employees_cached()
         
         reminder_text = (
@@ -394,7 +421,6 @@ async def admin_remind_all(callback: CallbackQuery, sheets_service: GoogleSheets
             f"Напоминания отправлены всем {sent_count} сотрудникам.",
             reply_markup=None
         )
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error sending reminders to all: {e}")
@@ -402,13 +428,21 @@ async def admin_remind_all(callback: CallbackQuery, sheets_service: GoogleSheets
             "Произошла ошибка при отправке напоминаний.",
             reply_markup=None
         )
-        await callback.answer()
 
 
 @admin_router.callback_query(F.data == "admin_send_all_tasks")
 async def admin_send_all_tasks(callback: CallbackQuery, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
     """Send all tasks to all employees who have them."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
+        # Show initial processing message
+        await callback.message.edit_text(
+            "🔄 Отправляю задачи всем сотрудникам...",
+            reply_markup=None
+        )
+        
         today = datetime.now().strftime("%d.%m.%Y")
         employees_with_tasks = await sheets_service.get_employees_with_tasks_batch(today)
         
@@ -418,7 +452,6 @@ async def admin_send_all_tasks(callback: CallbackQuery, sheets_service: GoogleSh
             f"Все задачи повторно отправлены {sent_count} сотрудникам.",
             reply_markup=None
         )
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error sending all tasks: {e}")
@@ -426,7 +459,6 @@ async def admin_send_all_tasks(callback: CallbackQuery, sheets_service: GoogleSh
             "Произошла ошибка при отправке всех задач.",
             reply_markup=None
         )
-        await callback.answer()
 
 
 @admin_router.callback_query(F.data == "admin_broadcast")
@@ -503,7 +535,16 @@ async def process_broadcast_message(
 @admin_router.callback_query(F.data == "admin_deadline_reminders")
 async def admin_deadline_reminders(callback: CallbackQuery, sheets_service: GoogleSheetsService, bot: Bot, config: Config):
     """Manually trigger deadline reminders."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
+        # Show initial processing message
+        await callback.message.edit_text(
+            "⏰ Проверяю дедлайны...",
+            reply_markup=None
+        )
+        
         from datetime import timedelta
         from ..utils.scheduler import current_timezone
         from ..utils.telegram_utils import parse_telegram_ids
@@ -587,7 +628,6 @@ async def admin_deadline_reminders(callback: CallbackQuery, sheets_service: Goog
             reply_markup=None,
             parse_mode="HTML"
         )
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error sending deadline reminders: {e}", exc_info=True)
@@ -595,7 +635,6 @@ async def admin_deadline_reminders(callback: CallbackQuery, sheets_service: Goog
             f"Произошла ошибка при отправке напоминаний: {str(e)}",
             reply_markup=None
         )
-        await callback.answer()
 
 
 @admin_router.message(Command("stats"))
@@ -639,6 +678,9 @@ async def cmd_stats(message: Message, config: Config, sheets_service: GoogleShee
 @admin_router.callback_query(F.data == "admin_sync_notion")
 async def admin_sync_notion(callback: CallbackQuery, config: Config):
     """Manually trigger Notion task synchronization."""
+    # Answer callback immediately to prevent timeout
+    await callback.answer()
+    
     try:
         from ..services import NotionService, TaskSyncService, GoogleSheetsService
         

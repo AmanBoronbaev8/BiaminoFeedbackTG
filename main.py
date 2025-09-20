@@ -25,10 +25,14 @@ async def main():
         config = load_config()
         logger.info("Configuration loaded successfully")
         
-        # Initialize bot with default properties
+        # Initialize bot with default properties and timeout settings
         bot = Bot(
             token=config.bot_token.get_secret_value(),
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            # Increase timeout for long operations
+            request_timeout=60,  # 60 seconds for request timeout
+            connect_timeout=30,  # 30 seconds for connection timeout
+            pool_timeout=10      # 10 seconds for connection pool timeout
         )
         
         # Initialize dispatcher with Redis storage
@@ -72,8 +76,14 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Bot started successfully")
         
-        # Start polling
-        await dp.start_polling(bot)
+        # Start polling with increased timeouts
+        await dp.start_polling(
+            bot,
+            # Increase polling timeout for long operations
+            polling_timeout=60,  # 60 seconds polling timeout
+            request_timeout=60,  # 60 seconds request timeout
+            allowed_updates=["message", "callback_query"]  # Only handle messages and callbacks
+        )
         
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
